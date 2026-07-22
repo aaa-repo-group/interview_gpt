@@ -1,0 +1,54 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+artifacts/
+publish/
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET test and coverage output
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+coverage.cobertura.xml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+
+# IDE/editor state
+.vs/
+.vscode/
+.idea/
+*.DotSettings.user
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs and diagnostics
+*.log
+*.dmp
+*.mdmp
+*.tmp
+*.temp
+
+# Local runtime data
+*.local.json
+*.secrets.json
+WebView2Profile/
+
+# Publish/self-contained bundles
+*.msix
+*.appx
+*.appxbundle
+*.msixbundle
