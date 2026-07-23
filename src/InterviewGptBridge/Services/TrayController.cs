@@ -6,14 +6,14 @@ public sealed class TrayController : IDisposable
 {
     private readonly Forms.NotifyIcon _notifyIcon;
     private readonly Forms.ToolStripMenuItem _showOverlayMenuItem;
-    private readonly Forms.ToolStripMenuItem _privacyModeMenuItem;
+    private readonly Forms.ToolStripMenuItem _clickThroughMenuItem;
     private bool _disposed;
 
     public event EventHandler? ShowMainRequested;
     public event EventHandler? ShowOverlayRequested;
     public event EventHandler? SettingsRequested;
     public event EventHandler? HideAllRequested;
-    public event Action<bool>? PrivacyModeChanged;
+    public event Action<bool>? ClickThroughChanged;
     public event EventHandler? ExitRequested;
 
     public TrayController()
@@ -31,11 +31,12 @@ public sealed class TrayController : IDisposable
         var settingsMenuItem = new Forms.ToolStripMenuItem("Settings...");
         settingsMenuItem.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
 
-        _privacyModeMenuItem = new Forms.ToolStripMenuItem("Privacy mode")
+        _clickThroughMenuItem = new Forms.ToolStripMenuItem("Caption click-through")
         {
-            CheckOnClick = true
+            CheckOnClick = true,
+            Enabled = false
         };
-        _privacyModeMenuItem.Click += (_, _) => PrivacyModeChanged?.Invoke(_privacyModeMenuItem.Checked);
+        _clickThroughMenuItem.Click += (_, _) => ClickThroughChanged?.Invoke(_clickThroughMenuItem.Checked);
 
         var exitMenuItem = new Forms.ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
@@ -45,7 +46,7 @@ public sealed class TrayController : IDisposable
         menu.Items.Add(_showOverlayMenuItem);
         menu.Items.Add(settingsMenuItem);
         menu.Items.Add(hideAllMenuItem);
-        menu.Items.Add(_privacyModeMenuItem);
+        menu.Items.Add(_clickThroughMenuItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(exitMenuItem);
 
@@ -53,7 +54,7 @@ public sealed class TrayController : IDisposable
         {
             ContextMenuStrip = menu,
             Icon = AppIcon.LoadDrawingIcon(),
-            Text = "Browser",
+            Text = "Dropbox",
             Visible = true
         };
         _notifyIcon.DoubleClick += (_, _) => ShowMainRequested?.Invoke(this, EventArgs.Empty);
@@ -62,11 +63,12 @@ public sealed class TrayController : IDisposable
     public void SetOverlayAvailable(bool available)
     {
         _showOverlayMenuItem.Enabled = available;
+        _clickThroughMenuItem.Enabled = available;
     }
 
-    public void SetPrivacyMode(bool enabled)
+    public void SetClickThrough(bool enabled)
     {
-        _privacyModeMenuItem.Checked = enabled;
+        _clickThroughMenuItem.Checked = enabled;
     }
 
     public void Dispose()

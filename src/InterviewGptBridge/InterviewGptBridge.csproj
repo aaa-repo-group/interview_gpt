@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>Assets\Browser.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\main_icon.ico</ApplicationIcon>
     <RootNamespace>InterviewGptBridge</RootNamespace>
     <AssemblyName>InterviewGptBridge</AssemblyName>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -21,5 +21,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\Browser.ico" />
+    <Resource Include="Assets\main_icon.ico" />
+    <Resource Include="..\..\main_icon.png" Link="Assets\main_icon.png" />
   </ItemGroup>
 </Project>

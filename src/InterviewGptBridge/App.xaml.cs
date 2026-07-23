@@ -6,12 +6,14 @@ namespace InterviewGptBridge;
 public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstanceMutex;
+    private bool _ownsSingleInstanceMutex;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         _singleInstanceMutex = new Mutex(true, "InterviewGptBridge.SingleInstance", out var createdNew);
+        _ownsSingleInstanceMutex = createdNew;
         if (!createdNew)
         {
             Shutdown();
@@ -26,7 +28,11 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _singleInstanceMutex?.ReleaseMutex();
+        if (_ownsSingleInstanceMutex)
+        {
+            _singleInstanceMutex?.ReleaseMutex();
+        }
+
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
     }

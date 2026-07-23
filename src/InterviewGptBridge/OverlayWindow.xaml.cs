@@ -3,19 +3,29 @@ using System.Windows.Controls;
 using System.ComponentModel;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Interop;
+using System.Runtime.InteropServices;
 using System.Windows.Threading;
 using InterviewGptBridge.Services;
+using WpfDataObject = System.Windows.DataObject;
 
 namespace InterviewGptBridge;
 
 public partial class OverlayWindow : Window
 {
+    private const int GwlExStyle = -20;
+    private const int WsExTransparent = 0x00000020;
+    private const int WsExLayered = 0x00080000;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private static readonly IntPtr HwndTopmost = new(-1);
+
     private readonly ISensitiveWindowProtectionService _sensitiveWindowProtectionService;
     private bool _loading;
-    private bool _privacyLoading;
     private bool _allowClose;
-    private bool _manualRedaction;
-    private bool _redactWhenInactive = true;
+    private bool _clickThrough;
+    private bool _keepAboveMainWindow = true;
     private bool _mouseSelecting;
     private bool _scrollingProgrammatically;
     private bool _autoScrollToBottom = true;
@@ -26,7 +36,6 @@ public partial class OverlayWindow : Window
 
     public event EventHandler<string>? TextSubmitted;
     public event EventHandler<OverlaySettings>? SettingsChanged;
-    public event Action<bool>? ManualRedactionChanged;
 
     public OverlayWindow(ISensitiveWindowProtectionService sensitiveWindowProtectionService)
     {
@@ -35,12 +44,11 @@ public partial class OverlayWindow : Window
         LocationChanged += (_, _) => RaiseSettingsChanged();
         SizeChanged += (_, _) => RaiseSettingsChanged();
         Loaded += (_, _) => AttachCaptionScrollViewer();
-        Activated += (_, _) => ApplyPrivacyCover();
-        Deactivated += (_, _) => ApplyPrivacyCover();
+        SourceInitialized += (_, _) => ApplyClickThrough();
         PreviewKeyDown += OverlayWindow_PreviewKeyDown;
         Closing += HandleClosing;
         Closed += (_, _) => _sensitiveWindowProtectionService.StatusChanged -= SensitiveWindowProtectionService_StatusChanged;
-        DataObject.AddCopyingHandler(CaptionTextBox, CaptionTextBox_Copying);
+        WpfDataObject.AddCopyingHandler(CaptionTextBox, CaptionTextBox_Copying);
 
         _sensitiveWindowProtectionService.StatusChanged += SensitiveWindowProtectionService_StatusChanged;
         _sensitiveWindowProtectionService.Register(this, "Caption overlay window for live captions, selected text, private notes, and submitted prompt content.");
@@ -50,22 +58,17 @@ public partial class OverlayWindow : Window
     public void LoadFrom(OverlaySettings settings)
     {
         _loading = true;
-        var opacity = Math.Clamp(settings.Opacity, 0.35, 1);
-        Left = settings.Left;
-        Top = settings.Top;
+        var fontSize = Math.Clamp(settings.FontSize, 12, 36);
         Width = Math.Max(MinWidth, settings.Width);
         Height = Math.Max(MinHeight, settings.Height);
-        OpacitySlider.Value = opacity;
-        Opacity = opacity;
-        TopmostCheckBox.IsChecked = settings.Topmost;
-        Topmost = settings.Topmost;
+        ApplyVisiblePosition(settings.Left, settings.Top);
+        FontSizeSlider.Value = fontSize;
+        CaptionTextBox.FontSize = fontSize;
+        Topmost = true;
+        _clickThrough = settings.ClickThrough;
+        _keepAboveMainWindow = settings.KeepAboveMainWindow;
+        ApplyClickThrough();
         _loading = false;
-    }
-
-    public void LoadPrivacyFrom(PrivacySettings settings)
-    {
-        _redactWhenInactive = settings.RedactWhenInactive;
-        SetManualRedactionCore(settings.ManualRedactionEnabled, notify: false);
     }
 
     public OverlaySettings CaptureSettings()
@@ -76,14 +79,43 @@ public partial class OverlayWindow : Window
             Top = RestoreBounds.Top,
             Width = RestoreBounds.Width,
             Height = RestoreBounds.Height,
-            Opacity = Math.Clamp(OpacitySlider.Value, 0.35, 1),
-            Topmost = TopmostCheckBox.IsChecked == true
+            FontSize = Math.Clamp(FontSizeSlider.Value, 12, 36),
+            Topmost = true,
+            ClickThrough = _clickThrough,
+            KeepAboveMainWindow = _keepAboveMainWindow
         };
     }
 
-    public void SetManualRedaction(bool enabled)
+    public void SetClickThrough(bool enabled)
     {
-        SetManualRedactionCore(enabled, notify: false);
+        _clickThrough = enabled;
+
+        ApplyClickThrough();
+        RaiseSettingsChanged();
+    }
+
+    public void SetKeepAboveMainWindow(bool enabled)
+    {
+        _keepAboveMainWindow = enabled;
+        RaiseSettingsChanged();
+    }
+
+    public void EnsureAboveMainWindow()
+    {
+        if (!IsVisible || !_keepAboveMainWindow)
+        {
+            return;
+        }
+
+        Topmost = true;
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate);
     }
 
     public void UpdateCaption(string caption)
@@ -95,16 +127,6 @@ public partial class OverlayWindow : Window
 
         _lastCaption = caption;
         ApplyCaption(caption);
-    }
-
-    public void SetCaptureStatus(string status)
-    {
-        CaptureStatusText.Text = status;
-    }
-
-    public void SetSubmitStatus(string status)
-    {
-        SubmitStatusText.Text = status;
     }
 
     public void CloseForExit()
@@ -168,12 +190,6 @@ public partial class OverlayWindow : Window
 
     private void SubmitCurrentText()
     {
-        if (ShouldRedact(IsActive))
-        {
-            SetSubmitStatus("Privacy mode active");
-            return;
-        }
-
         var text = CaptionTextBox.SelectedText;
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -198,25 +214,14 @@ public partial class OverlayWindow : Window
         text = text.Trim();
         if (string.IsNullOrWhiteSpace(text))
         {
-            SetSubmitStatus("No text selected");
             return;
         }
 
         TextSubmitted?.Invoke(this, text);
     }
 
-    private void OverlayWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    private void OverlayWindow_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        if (e.Key == Key.P && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
-        {
-            e.Handled = true;
-            SetManualRedactionCore(!_manualRedaction, notify: true);
-        }
-    }
-
-    private void SendButton_Click(object sender, RoutedEventArgs e)
-    {
-        SubmitCurrentText();
     }
 
     private void CaptionTextBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -275,63 +280,23 @@ public partial class OverlayWindow : Window
     {
         if (_sensitiveWindowProtectionService.Enabled)
         {
-            SetSubmitStatus("Copied text can be captured from the clipboard.");
         }
     }
 
-    private void OpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private void FontSizeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_loading)
         {
             return;
         }
 
-        Opacity = Math.Clamp(OpacitySlider.Value, 0.35, 1);
-        RaiseSettingsChanged();
-    }
-
-    private void TopmostCheckBox_Changed(object sender, RoutedEventArgs e)
-    {
-        if (_loading)
+        if (CaptionTextBox is null)
         {
             return;
         }
 
-        Topmost = TopmostCheckBox.IsChecked == true;
+        CaptionTextBox.FontSize = Math.Clamp(FontSizeSlider.Value, 12, 36);
         RaiseSettingsChanged();
-    }
-
-    private void PrivacyCheckBox_Changed(object sender, RoutedEventArgs e)
-    {
-        if (_privacyLoading)
-        {
-            return;
-        }
-
-        SetManualRedactionCore(PrivacyCheckBox.IsChecked == true, notify: true);
-    }
-
-    private void SetManualRedactionCore(bool enabled, bool notify)
-    {
-        _manualRedaction = enabled;
-        _privacyLoading = true;
-        PrivacyCheckBox.IsChecked = enabled;
-        _privacyLoading = false;
-
-        ApplyPrivacyCover();
-
-        if (notify)
-        {
-            ManualRedactionChanged?.Invoke(enabled);
-        }
-    }
-
-    private void ApplyPrivacyCover()
-    {
-        var shouldRedact = ShouldRedact(IsActive);
-        CaptionTextBox.Visibility = shouldRedact ? Visibility.Hidden : Visibility.Visible;
-        PrivacyCover.Visibility = shouldRedact ? Visibility.Visible : Visibility.Collapsed;
-        SendButton.IsEnabled = !shouldRedact;
     }
 
     private void SensitiveWindowProtectionService_StatusChanged(object? sender, SensitiveWindowProtectionSummary summary)
@@ -343,30 +308,48 @@ public partial class OverlayWindow : Window
     {
         if (!_sensitiveWindowProtectionService.Enabled)
         {
-            ProtectionStatusText.Visibility = Visibility.Collapsed;
-            ProtectionStatusText.ToolTip = null;
             return;
         }
-
-        ProtectionStatusText.Visibility = Visibility.Visible;
-        ProtectionStatusText.ToolTip = snapshot?.Result.Message
-            ?? "Sensitive Window Protection status is unavailable for this window.";
-
-        if (snapshot?.Result.IsProtected == true)
-        {
-            ProtectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(217, 247, 215));
-            ProtectionStatusText.Text = "Capture protection on";
-            return;
-        }
-
-        ProtectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 222, 179));
-        ProtectionStatusText.Text = "Protection warning";
     }
 
-    private bool ShouldRedact(bool isActive)
+    private void ApplyClickThrough()
     {
-        return _manualRedaction || (_redactWhenInactive && !isActive);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var style = GetWindowLong(hwnd, GwlExStyle);
+        if (_clickThrough)
+        {
+            style |= WsExTransparent | WsExLayered;
+        }
+        else
+        {
+            style &= ~WsExTransparent;
+        }
+
+        SetWindowLong(hwnd, GwlExStyle, style);
     }
+
+    private void ApplyVisiblePosition(double savedLeft, double savedTop)
+    {
+        var virtualLeft = SystemParameters.VirtualScreenLeft;
+        var virtualTop = SystemParameters.VirtualScreenTop;
+        var virtualRight = virtualLeft + SystemParameters.VirtualScreenWidth;
+        var virtualBottom = virtualTop + SystemParameters.VirtualScreenHeight;
+        var maxLeft = Math.Max(virtualLeft, virtualRight - Width);
+        var maxTop = Math.Max(virtualTop, virtualBottom - Height);
+
+        Left = double.IsFinite(savedLeft)
+            ? Math.Clamp(savedLeft, virtualLeft, maxLeft)
+            : virtualLeft + 80;
+        Top = double.IsFinite(savedTop)
+            ? Math.Clamp(savedTop, virtualTop, maxTop)
+            : virtualTop + 80;
+    }
+
 
     private void RaiseSettingsChanged()
     {
@@ -507,4 +490,13 @@ public partial class OverlayWindow : Window
         Hide();
         RaiseSettingsChanged();
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr hwndInsertAfter, int x, int y, int width, int height, uint flags);
 }

@@ -8,10 +8,12 @@
         WindowStartupLocation="CenterOwner"
         Background="#151922"
         Foreground="#F4F7FB"
-        Icon="Assets/Browser.ico"
+        Icon="Assets/main_icon.png"
         ShowInTaskbar="False">
     <Grid Margin="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -58,14 +60,60 @@
             </Border>
         </StackPanel>
 
-        <TextBlock Grid.Row="2"
+        <StackPanel Grid.Row="2"
+                    Margin="0,18,0,0">
+            <TextBlock FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="#CAD1DD"
+                       Text="Caption Bridge" />
+
+            <CheckBox x:Name="CaptionAlwaysAboveMainCheckBox"
+                      Margin="0,14,0,0"
+                      Foreground="#F4F7FB"
+                      Content="Always over main window"
+                      Checked="CaptionAlwaysAboveMainCheckBox_Changed"
+                      Unchecked="CaptionAlwaysAboveMainCheckBox_Changed" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="3"
+                    Margin="0,18,0,0">
+            <TextBlock FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="#CAD1DD"
+                       Text="Hotkeys" />
+
+            <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Grid.Column="0"
+                           VerticalAlignment="Center"
+                           Foreground="#AEB7C5"
+                           FontSize="12"
+                           Text="Toggle caption dialog" />
+                <TextBox x:Name="ToggleOverlayHotKeyTextBox"
+                         Grid.Row="0"
+                         Grid.Column="1"
+                         Height="28"
+                         Padding="8,4"
+                         PreviewKeyDown="HotKeyTextBox_PreviewKeyDown" />
+            </Grid>
+        </StackPanel>
+
+        <TextBlock Grid.Row="4"
                    Margin="0,18,0,0"
                    Foreground="#AEB7C5"
                    FontSize="12"
                    TextWrapping="Wrap"
                    Text="This feature uses documented operating-system APIs only. It does not detect, interfere with, bypass, disable, or conceal activity from remote-session tools, monitoring software, endpoint security tools, administrators, or operating-system security controls." />
 
-        <StackPanel Grid.Row="3"
+        <StackPanel Grid.Row="5"
                     Margin="0,20,0,0"
                     HorizontalAlignment="Right"
                     Orientation="Horizontal">

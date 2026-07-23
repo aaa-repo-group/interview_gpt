@@ -1,16 +1,27 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using InterviewGptBridge.Services;
 using Microsoft.Web.WebView2.Core;
+using MediaColor = System.Windows.Media.Color;
 
 namespace InterviewGptBridge;
 
 public partial class MainWindow : Window
 {
+    private const int WmHotKey = 0x0312;
+    private const int ToggleOverlayHotKeyId = 101;
+    private const uint ModAlt = 0x0001;
+    private const uint ModControl = 0x0002;
+    private const uint ModShift = 0x0004;
+    private const uint ModWin = 0x0008;
+    private const uint ModNoRepeat = 0x4000;
+
     private static readonly JsonSerializerOptions SubmitJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -24,6 +35,7 @@ public partial class MainWindow : Window
     private LiveCaptionWatcher? _captionWatcher;
     private OverlayWindow? _overlayWindow;
     private SettingsWindow? _settingsWindow;
+    private HwndSource? _hotKeySource;
     private bool _overlayStarted;
     private bool _isExiting;
     private bool _servicesShutdown;
@@ -34,15 +46,16 @@ public partial class MainWindow : Window
 
         _settings = _settingsStore.Load();
         NormalizeSettings();
+        Topmost = true;
 
         _trayController = new TrayController();
         _trayController.ShowMainRequested += (_, _) => Dispatcher.BeginInvoke(ShowMainWindow);
         _trayController.ShowOverlayRequested += (_, _) => Dispatcher.BeginInvoke(ShowOverlayWindow);
         _trayController.SettingsRequested += (_, _) => Dispatcher.BeginInvoke(ShowSettingsWindow);
         _trayController.HideAllRequested += (_, _) => Dispatcher.BeginInvoke(HideAllWindows);
-        _trayController.PrivacyModeChanged += enabled => Dispatcher.BeginInvoke(() => SetManualRedaction(enabled));
+        _trayController.ClickThroughChanged += enabled => Dispatcher.BeginInvoke(() => SetOverlayClickThrough(enabled));
         _trayController.ExitRequested += (_, _) => Dispatcher.BeginInvoke(ExitApplication);
-        _trayController.SetPrivacyMode(_settings.Privacy.ManualRedactionEnabled);
+        _trayController.SetClickThrough(_settings.Overlay.ClickThrough);
 
         _sensitiveWindowProtectionService.StatusChanged += (_, summary) =>
             Dispatcher.BeginInvoke(() => UpdateSensitiveWindowProtectionIndicator(summary));
@@ -55,19 +68,25 @@ public partial class MainWindow : Window
         };
         _chatReadyProbeTimer.Tick += async (_, _) => await ProbeChatGptReadyAsync();
 
-        Loaded += async (_, _) => await InitializeBrowserAsync();
-        Activated += (_, _) => ApplyMainPrivacyCover();
-        Deactivated += (_, _) => ApplyMainPrivacyCover();
+        Loaded += async (_, _) =>
+        {
+            LiveCaptionsLauncher.LaunchAfterDelay(Dispatcher, TimeSpan.FromMilliseconds(700));
+            StartOverlayAndCaptionWatcher();
+            await InitializeBrowserAsync();
+        };
+        SourceInitialized += MainWindow_SourceInitialized;
         PreviewKeyDown += MainWindow_PreviewKeyDown;
+        Activated += (_, _) => EnsureOverlayAboveMainWindow();
         Closing += (_, e) => HandleClosing(e);
 
-        ApplyMainPrivacyCover();
+        ShowBrowserContent();
         UpdateSensitiveWindowProtectionIndicator(_sensitiveWindowProtectionService.CurrentSummary);
     }
 
     private void NormalizeSettings()
     {
         _settings.Overlay ??= new OverlaySettings();
+        _settings.HotKeys ??= new HotKeySettings();
         _settings.Privacy ??= new PrivacySettings();
 
         if (!_settings.Privacy.SensitiveWindowProtectionUserConfigured)
@@ -78,6 +97,31 @@ public partial class MainWindow : Window
                 _settingsStore.Save(_settings);
             }
         }
+
+        if (_settings.Privacy.RedactWhenInactive)
+        {
+            _settings.Privacy.RedactWhenInactive = false;
+            _settingsStore.Save(_settings);
+        }
+
+        if (_settings.Privacy.ManualRedactionEnabled)
+        {
+            _settings.Privacy.ManualRedactionEnabled = false;
+            _settingsStore.Save(_settings);
+        }
+
+        if (_settings.Overlay.ClickThrough)
+        {
+            _settings.Overlay.ClickThrough = false;
+            _settingsStore.Save(_settings);
+        }
+    }
+
+    private void MainWindow_SourceInitialized(object? sender, EventArgs e)
+    {
+        _hotKeySource = HwndSource.FromVisual(this) as HwndSource;
+        _hotKeySource?.AddHook(HotKeyWindowProc);
+        RegisterOverlayHotKeys();
     }
 
     private async Task InitializeBrowserAsync()
@@ -163,17 +207,18 @@ public partial class MainWindow : Window
         _overlayStarted = true;
         _overlayWindow = new OverlayWindow(_sensitiveWindowProtectionService);
         _overlayWindow.LoadFrom(_settings.Overlay);
-        _overlayWindow.LoadPrivacyFrom(_settings.Privacy);
         _overlayWindow.TextSubmitted += async (_, text) => await SubmitPromptAsync(text);
         _overlayWindow.SettingsChanged += (_, overlaySettings) =>
         {
             _settings.Overlay = overlaySettings;
             _settingsStore.Save(_settings);
+            _trayController.SetClickThrough(overlaySettings.ClickThrough);
         };
-        _overlayWindow.ManualRedactionChanged += enabled => SetManualRedaction(enabled);
         _overlayWindow.Show();
+        EnsureOverlayAboveMainWindow();
         _sensitiveWindowProtectionService.ReapplyAll();
         _trayController.SetOverlayAvailable(true);
+        _trayController.SetClickThrough(_settings.Overlay.ClickThrough);
 
         _captionWatcher = new LiveCaptionWatcher(TimeSpan.FromMilliseconds(_settings.CaptionPollMs));
         _captionWatcher.CaptionChanged += (_, snapshot) =>
@@ -192,7 +237,7 @@ public partial class MainWindow : Window
             {
                 if (!_isExiting)
                 {
-                    _overlayWindow?.SetCaptureStatus(status);
+                    ShowStatus(status);
                 }
             });
         };
@@ -200,12 +245,11 @@ public partial class MainWindow : Window
 
     }
 
-    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    private void MainWindow_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.P && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
         {
             e.Handled = true;
-            SetManualRedaction(!_settings.Privacy.ManualRedactionEnabled);
         }
     }
 
@@ -222,16 +266,16 @@ public partial class MainWindow : Window
             var submission = JsonSerializer.Deserialize<SubmitResult>(result, SubmitJsonOptions);
             if (submission?.Ok == true)
             {
-                _overlayWindow?.SetSubmitStatus("Sent to ChatGPT");
+                ShowStatus("Sent to ChatGPT");
             }
             else
             {
-                _overlayWindow?.SetSubmitStatus(submission?.Reason ?? "Could not find the ChatGPT prompt");
+                ShowStatus(submission?.Reason ?? "Could not find the ChatGPT prompt");
             }
         }
         catch (Exception ex)
         {
-            _overlayWindow?.SetSubmitStatus("Submit failed: " + ex.Message);
+            ShowStatus("Submit failed: " + ex.Message);
         }
     }
 
@@ -244,21 +288,6 @@ public partial class MainWindow : Window
     private void HideStatus()
     {
         StatusBanner.Visibility = Visibility.Collapsed;
-    }
-
-    private void SetManualRedaction(bool enabled)
-    {
-        var changed = _settings.Privacy.ManualRedactionEnabled != enabled;
-        _settings.Privacy.ManualRedactionEnabled = enabled;
-
-        if (changed)
-        {
-            _settingsStore.Save(_settings);
-        }
-
-        _trayController.SetPrivacyMode(enabled);
-        _overlayWindow?.SetManualRedaction(enabled);
-        ApplyMainPrivacyCover();
     }
 
     private void SetSensitiveWindowProtection(bool enabled)
@@ -278,6 +307,33 @@ public partial class MainWindow : Window
         _settingsWindow?.SetSensitiveWindowProtectionStatus(_sensitiveWindowProtectionService.CurrentSummary);
     }
 
+    private void SetOverlayClickThrough(bool enabled)
+    {
+        _settings.Overlay.ClickThrough = enabled;
+        _settingsStore.Save(_settings);
+        _trayController.SetClickThrough(enabled);
+        _overlayWindow?.SetClickThrough(enabled);
+    }
+
+    private void SetHotKeys(HotKeySettings hotKeys)
+    {
+        _settings.HotKeys = hotKeys;
+        _settingsStore.Save(_settings);
+        RegisterOverlayHotKeys();
+    }
+
+    private void SetCaptionAlwaysAboveMainWindow(bool enabled)
+    {
+        _settings.Overlay.KeepAboveMainWindow = enabled;
+        _settingsStore.Save(_settings);
+        _overlayWindow?.SetKeepAboveMainWindow(enabled);
+
+        if (enabled)
+        {
+            EnsureOverlayAboveMainWindow();
+        }
+    }
+
     private void UpdateSensitiveWindowProtectionIndicator(SensitiveWindowProtectionSummary summary)
     {
         if (!summary.Enabled)
@@ -292,16 +348,16 @@ public partial class MainWindow : Window
 
         if (summary.IsProtected)
         {
-            ProtectionBanner.Background = new SolidColorBrush(Color.FromArgb(230, 38, 51, 37));
-            ProtectionBanner.BorderBrush = new SolidColorBrush(Color.FromRgb(77, 138, 74));
-            ProtectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(217, 247, 215));
+            ProtectionBanner.Background = new SolidColorBrush(MediaColor.FromArgb(230, 38, 51, 37));
+            ProtectionBanner.BorderBrush = new SolidColorBrush(MediaColor.FromRgb(77, 138, 74));
+            ProtectionStatusText.Foreground = new SolidColorBrush(MediaColor.FromRgb(217, 247, 215));
             ProtectionStatusText.Text = "Capture protection on";
             return;
         }
 
-        ProtectionBanner.Background = new SolidColorBrush(Color.FromArgb(230, 59, 43, 25));
-        ProtectionBanner.BorderBrush = new SolidColorBrush(Color.FromRgb(168, 112, 44));
-        ProtectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 222, 179));
+        ProtectionBanner.Background = new SolidColorBrush(MediaColor.FromArgb(230, 59, 43, 25));
+        ProtectionBanner.BorderBrush = new SolidColorBrush(MediaColor.FromRgb(168, 112, 44));
+        ProtectionStatusText.Foreground = new SolidColorBrush(MediaColor.FromRgb(255, 222, 179));
         ProtectionStatusText.Text = "Protection warning";
     }
 
@@ -313,17 +369,166 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyMainPrivacyCover()
+    private void ShowBrowserContent()
     {
-        var shouldRedact = ShouldRedact(IsActive);
-        Browser.Visibility = shouldRedact ? Visibility.Hidden : Visibility.Visible;
-        PrivacyCover.Visibility = shouldRedact ? Visibility.Visible : Visibility.Collapsed;
+        Browser.Visibility = Visibility.Visible;
     }
 
-    private bool ShouldRedact(bool isActive)
+    private void EnsureOverlayAboveMainWindow()
     {
-        return _settings.Privacy.ManualRedactionEnabled ||
-               (_settings.Privacy.RedactWhenInactive && !isActive);
+        Topmost = true;
+        if (_settings.Overlay.KeepAboveMainWindow)
+        {
+            _overlayWindow?.EnsureAboveMainWindow();
+        }
+    }
+
+    private void RegisterOverlayHotKeys()
+    {
+        if (_hotKeySource is null)
+        {
+            return;
+        }
+
+        UnregisterOverlayHotKeys();
+        TryRegisterHotKey(ToggleOverlayHotKeyId, _settings.HotKeys.ToggleOverlay, "toggle caption dialog");
+    }
+
+    private void UnregisterOverlayHotKeys()
+    {
+        if (_hotKeySource is null)
+        {
+            return;
+        }
+
+        UnregisterHotKey(_hotKeySource.Handle, ToggleOverlayHotKeyId);
+    }
+
+    private void TryRegisterHotKey(int id, string gesture, string description)
+    {
+        if (_hotKeySource is null || string.IsNullOrWhiteSpace(gesture))
+        {
+            return;
+        }
+
+        if (!TryParseHotKey(gesture, out var modifiers, out var virtualKey))
+        {
+            ShowStatus("Could not parse hotkey for " + description + ".");
+            return;
+        }
+
+        if (!RegisterHotKey(_hotKeySource.Handle, id, modifiers | ModNoRepeat, virtualKey))
+        {
+            ShowStatus("Could not register hotkey for " + description + ".");
+        }
+    }
+
+    private IntPtr HotKeyWindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != WmHotKey)
+        {
+            return IntPtr.Zero;
+        }
+
+        handled = true;
+        switch (wParam.ToInt32())
+        {
+            case ToggleOverlayHotKeyId:
+                ToggleOverlayWindow();
+                break;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void ToggleOverlayWindow()
+    {
+        if (_overlayWindow is null || !_overlayWindow.IsVisible || _overlayWindow.WindowState == WindowState.Minimized)
+        {
+            RestoreOverlayWindow();
+            return;
+        }
+
+        MinimizeOverlayWindow();
+    }
+
+    private void MinimizeOverlayWindow()
+    {
+        if (_overlayWindow is null)
+        {
+            return;
+        }
+
+        _settings.Overlay = _overlayWindow.CaptureSettings();
+        _settingsStore.Save(_settings);
+        _overlayWindow.WindowState = WindowState.Minimized;
+    }
+
+    private void RestoreOverlayWindow()
+    {
+        if (_overlayWindow is null)
+        {
+            StartOverlayAndCaptionWatcher();
+        }
+
+        if (_overlayWindow is null)
+        {
+            return;
+        }
+
+        _overlayWindow.Show();
+        _overlayWindow.WindowState = WindowState.Normal;
+        EnsureOverlayAboveMainWindow();
+        _overlayWindow.Activate();
+    }
+
+    private static bool TryParseHotKey(string gesture, out uint modifiers, out uint virtualKey)
+    {
+        modifiers = 0;
+        virtualKey = 0;
+
+        var key = Key.None;
+        foreach (var rawPart in gesture.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (rawPart.Equals("Ctrl", StringComparison.OrdinalIgnoreCase)
+                || rawPart.Equals("Control", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModControl;
+                continue;
+            }
+
+            if (rawPart.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModAlt;
+                continue;
+            }
+
+            if (rawPart.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModShift;
+                continue;
+            }
+
+            if (rawPart.Equals("Win", StringComparison.OrdinalIgnoreCase)
+                || rawPart.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModWin;
+                continue;
+            }
+
+            if (!Enum.TryParse(rawPart, ignoreCase: true, out key))
+            {
+                return false;
+            }
+        }
+
+        if (key == Key.None)
+        {
+            return false;
+        }
+
+        virtualKey = (uint)KeyInterop.VirtualKeyFromKey(key);
+        return virtualKey != 0;
     }
 
     private void ShutdownServices()
@@ -347,6 +552,12 @@ public partial class MainWindow : Window
         _settingsWindow?.Close();
         (_sensitiveWindowProtectionService as IDisposable)?.Dispose();
         _trayController.Dispose();
+        UnregisterOverlayHotKeys();
+        if (_hotKeySource is not null)
+        {
+            _hotKeySource.RemoveHook(HotKeyWindowProc);
+            _hotKeySource = null;
+        }
         Browser.Dispose();
     }
 
@@ -366,19 +577,30 @@ public partial class MainWindow : Window
     {
         Show();
         WindowState = WindowState.Normal;
+        Topmost = true;
         Activate();
-        ApplyMainPrivacyCover();
+        ShowBrowserContent();
+        EnsureOverlayAboveMainWindow();
     }
 
     private void ShowOverlayWindow()
     {
         if (_overlayWindow is null)
         {
+            StartOverlayAndCaptionWatcher();
+        }
+
+        if (_overlayWindow is null)
+        {
             return;
         }
 
+        _overlayWindow.SetClickThrough(false);
         _overlayWindow.Show();
+        _overlayWindow.WindowState = WindowState.Normal;
+        EnsureOverlayAboveMainWindow();
         _overlayWindow.Activate();
+        _trayController.SetClickThrough(false);
         _sensitiveWindowProtectionService.ReapplyAll();
     }
 
@@ -394,10 +616,14 @@ public partial class MainWindow : Window
 
             _settingsWindow.SensitiveWindowProtectionChanged += enabled =>
                 Dispatcher.BeginInvoke(() => SetSensitiveWindowProtection(enabled));
+            _settingsWindow.HotKeysChanged += hotKeys =>
+                Dispatcher.BeginInvoke(() => SetHotKeys(hotKeys));
+            _settingsWindow.CaptionAlwaysAboveMainWindowChanged += enabled =>
+                Dispatcher.BeginInvoke(() => SetCaptionAlwaysAboveMainWindow(enabled));
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
 
-        _settingsWindow.LoadFrom(_settings.Privacy, _sensitiveWindowProtectionService.CurrentSummary);
+        _settingsWindow.LoadFrom(_settings.Privacy, _sensitiveWindowProtectionService.CurrentSummary, _settings.Overlay, _settings.HotKeys);
         _settingsWindow.Show();
         _settingsWindow.Activate();
     }
@@ -426,4 +652,11 @@ public partial class MainWindow : Window
         public bool Ok { get; set; }
         public string? Reason { get; set; }
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint virtualKey);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hwnd, int id);
+
 }

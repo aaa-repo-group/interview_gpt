@@ -5,26 +5,15 @@
         Title="ChatGPT"
         Width="1180"
         Height="820"
-        MinWidth="720"
+        MinWidth="420"
         MinHeight="520"
         WindowStartupLocation="CenterScreen"
         Background="#111418"
-        Icon="Assets/Browser.ico"
-        ShowInTaskbar="False">
+        Icon="Assets/main_icon.png"
+        ShowInTaskbar="False"
+        Topmost="True">
     <Grid>
         <wv2:WebView2 x:Name="Browser" />
-
-        <Border x:Name="PrivacyCover"
-                Panel.ZIndex="10"
-                Background="#F2151922"
-                Visibility="Collapsed">
-            <TextBlock HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       Foreground="#F4F7FB"
-                       FontSize="18"
-                       FontWeight="SemiBold"
-                       Text="Private" />
-        </Border>
 
         <Border x:Name="StatusBanner"
                 Panel.ZIndex="20"
