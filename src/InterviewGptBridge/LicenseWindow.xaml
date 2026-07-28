@@ -1,0 +1,91 @@
+<Window x:Class="InterviewGptBridge.LicenseWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Device Authorization"
+        Width="560"
+        SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        Background="#151922"
+        Foreground="#F4F7FB"
+        Icon="Assets/main_icon.png">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   FontSize="20"
+                   FontWeight="SemiBold"
+                   Text="Device Authorization" />
+
+        <StackPanel Grid.Row="1"
+                    Margin="0,18,0,0">
+            <TextBlock Foreground="#AEB7C5"
+                       FontSize="12"
+                       Text="Device key" />
+            <Grid Margin="0,6,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="88" />
+                </Grid.ColumnDefinitions>
+
+                <TextBox x:Name="DeviceIdTextBox"
+                         Grid.Column="0"
+                         Height="34"
+                         Padding="8,7"
+                         FontFamily="Consolas"
+                         FontSize="12"
+                         IsReadOnly="True"
+                         TextWrapping="NoWrap" />
+                <Button Grid.Column="1"
+                        Margin="8,0,0,0"
+                        Width="80"
+                        Height="34"
+                        Content="Copy"
+                        Click="CopyDeviceIdButton_Click" />
+            </Grid>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2"
+                    Margin="0,16,0,0">
+            <TextBlock Foreground="#AEB7C5"
+                       FontSize="12"
+                       Text="License key" />
+            <TextBox x:Name="LicenseKeyTextBox"
+                     Margin="0,6,0,0"
+                     Height="86"
+                     Padding="8"
+                     AcceptsReturn="True"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     TextWrapping="Wrap" />
+        </StackPanel>
+
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="3"
+                   Margin="0,12,0,0"
+                   Foreground="#FFDEB3"
+                   FontSize="12"
+                   TextWrapping="Wrap" />
+
+        <StackPanel Grid.Row="4"
+                    Margin="0,20,0,0"
+                    HorizontalAlignment="Right"
+                    Orientation="Horizontal">
+            <Button Width="84"
+                    Height="30"
+                    Content="Exit"
+                    Click="ExitButton_Click" />
+            <Button Width="96"
+                    Height="30"
+                    Margin="8,0,0,0"
+                    Content="Authorize"
+                    Click="AuthorizeButton_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

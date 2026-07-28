@@ -88,6 +88,7 @@ public partial class MainWindow : Window
         _settings.Overlay ??= new OverlaySettings();
         _settings.HotKeys ??= new HotKeySettings();
         _settings.Privacy ??= new PrivacySettings();
+        _settings.License ??= new LicenseSettings();
 
         if (!_settings.Privacy.SensitiveWindowProtectionUserConfigured)
         {
@@ -552,6 +553,7 @@ public partial class MainWindow : Window
         _settingsWindow?.Close();
         (_sensitiveWindowProtectionService as IDisposable)?.Dispose();
         _trayController.Dispose();
+        LiveCaptionsLauncher.CloseIfOpen();
         UnregisterOverlayHotKeys();
         if (_hotKeySource is not null)
         {

@@ -8,6 +8,7 @@ public sealed class AppSettings
     public OverlaySettings Overlay { get; set; } = new();
     public HotKeySettings HotKeys { get; set; } = new();
     public PrivacySettings Privacy { get; set; } = new();
+    public LicenseSettings License { get; set; } = new();
 }
 
 public sealed class HotKeySettings
@@ -33,4 +34,11 @@ public sealed class PrivacySettings
     public bool RedactWhenInactive { get; set; }
     public bool SensitiveWindowProtectionEnabled { get; set; } = true;
     public bool SensitiveWindowProtectionUserConfigured { get; set; }
+}
+
+public sealed class LicenseSettings
+{
+    public string LicenseKey { get; set; } = string.Empty;
+    public string AuthorizedDeviceId { get; set; } = string.Empty;
+    public DateTimeOffset? ExpiresUtc { get; set; }
 }

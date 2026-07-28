@@ -3,6 +3,7 @@
 [Oo]bj/
 artifacts/
 publish/
+.dotnet/
 *.user
 *.rsuser
 *.suo

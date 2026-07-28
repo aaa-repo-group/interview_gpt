@@ -1,0 +1,86 @@
+<Window x:Class="InterviewGptLicenseTool.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="License Generator"
+        Width="580"
+        SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        Background="#151922"
+        Foreground="#F4F7FB"
+        Icon="Assets/main_icon.png">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   FontSize="20"
+                   FontWeight="SemiBold"
+                   Text="License Generator" />
+
+        <StackPanel Grid.Row="1"
+                    Margin="0,18,0,0">
+            <TextBlock Foreground="#AEB7C5"
+                       FontSize="12"
+                       Text="Device key" />
+            <TextBox x:Name="DeviceIdTextBox"
+                     Margin="0,6,0,0"
+                     Height="58"
+                     Padding="8"
+                     AcceptsReturn="True"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     TextWrapping="Wrap" />
+        </StackPanel>
+
+        <Button Grid.Row="2"
+                Margin="0,14,0,0"
+                HorizontalAlignment="Left"
+                Width="112"
+                Height="32"
+                Content="Generate"
+                Click="GenerateButton_Click" />
+
+        <StackPanel Grid.Row="3"
+                    Margin="0,16,0,0">
+            <TextBlock Foreground="#AEB7C5"
+                       FontSize="12"
+                       Text="License key" />
+            <Grid Margin="0,6,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="88" />
+                </Grid.ColumnDefinitions>
+
+                <TextBox x:Name="LicenseKeyTextBox"
+                         Grid.Column="0"
+                         Height="96"
+                         Padding="8"
+                         AcceptsReturn="True"
+                         FontFamily="Consolas"
+                         FontSize="12"
+                         IsReadOnly="True"
+                         TextWrapping="Wrap" />
+                <Button Grid.Column="1"
+                        Margin="8,0,0,0"
+                        Width="80"
+                        Height="32"
+                        VerticalAlignment="Top"
+                        Content="Copy"
+                        Click="CopyLicenseButton_Click" />
+            </Grid>
+        </StackPanel>
+
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="4"
+                   Margin="0,12,0,0"
+                   Foreground="#CAD1DD"
+                   FontSize="12"
+                   TextWrapping="Wrap" />
+    </Grid>
+</Window>
