@@ -24,11 +24,13 @@ public partial class App : System.Windows.Application
 
         base.OnStartup(e);
 
+#if !NO_LICENSE
         if (!AuthorizeDevice())
         {
             Shutdown();
             return;
         }
+#endif
 
         var mainWindow = new MainWindow();
         MainWindow = mainWindow;
