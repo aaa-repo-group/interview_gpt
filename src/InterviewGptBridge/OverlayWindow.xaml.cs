@@ -14,6 +14,8 @@ namespace InterviewGptBridge;
 public partial class OverlayWindow : Window
 {
     private const int GwlExStyle = -20;
+    private const int WmNcHitTest = 0x0084;
+    private const int HtTransparent = -1;
     private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const uint SwpNoSize = 0x0001;
@@ -26,6 +28,8 @@ public partial class OverlayWindow : Window
     private bool _allowClose;
     private bool _clickThrough;
     private bool _keepAboveMainWindow = true;
+    private double _windowOpacity = 1.0;
+    private HwndSource? _hwndSource;
     private bool _mouseSelecting;
     private bool _scrollingProgrammatically;
     private bool _autoScrollToBottom = true;
@@ -44,10 +48,19 @@ public partial class OverlayWindow : Window
         LocationChanged += (_, _) => RaiseSettingsChanged();
         SizeChanged += (_, _) => RaiseSettingsChanged();
         Loaded += (_, _) => AttachCaptionScrollViewer();
-        SourceInitialized += (_, _) => ApplyClickThrough();
+        SourceInitialized += (_, _) =>
+        {
+            AttachHwndHook();
+            ApplyClickThrough();
+            ApplyWindowOpacity();
+        };
         PreviewKeyDown += OverlayWindow_PreviewKeyDown;
         Closing += HandleClosing;
-        Closed += (_, _) => _sensitiveWindowProtectionService.StatusChanged -= SensitiveWindowProtectionService_StatusChanged;
+        Closed += (_, _) =>
+        {
+            DetachHwndHook();
+            _sensitiveWindowProtectionService.StatusChanged -= SensitiveWindowProtectionService_StatusChanged;
+        };
         WpfDataObject.AddCopyingHandler(CaptionTextBox, CaptionTextBox_Copying);
 
         _sensitiveWindowProtectionService.StatusChanged += SensitiveWindowProtectionService_StatusChanged;
@@ -64,10 +77,13 @@ public partial class OverlayWindow : Window
         ApplyVisiblePosition(settings.Left, settings.Top);
         FontSizeSlider.Value = fontSize;
         CaptionTextBox.FontSize = fontSize;
+        _windowOpacity = WindowOpacityController.Normalize(settings.WindowOpacity);
+        CaptionOpacitySlider.Value = _windowOpacity * 100;
         Topmost = true;
         _clickThrough = settings.ClickThrough;
         _keepAboveMainWindow = settings.KeepAboveMainWindow;
         ApplyClickThrough();
+        ApplyWindowOpacity();
         _loading = false;
     }
 
@@ -80,6 +96,7 @@ public partial class OverlayWindow : Window
             Width = RestoreBounds.Width,
             Height = RestoreBounds.Height,
             FontSize = Math.Clamp(FontSizeSlider.Value, 12, 36),
+            WindowOpacity = _windowOpacity,
             Topmost = true,
             ClickThrough = _clickThrough,
             KeepAboveMainWindow = _keepAboveMainWindow
@@ -91,6 +108,19 @@ public partial class OverlayWindow : Window
         _clickThrough = enabled;
 
         ApplyClickThrough();
+        ApplyWindowOpacity();
+        RaiseSettingsChanged();
+    }
+
+    public void SetWindowOpacity(double opacity)
+    {
+        _windowOpacity = WindowOpacityController.Normalize(opacity);
+        if (CaptionOpacitySlider is not null)
+        {
+            CaptionOpacitySlider.Value = _windowOpacity * 100;
+        }
+
+        ApplyWindowOpacity();
         RaiseSettingsChanged();
     }
 
@@ -299,6 +329,18 @@ public partial class OverlayWindow : Window
         RaiseSettingsChanged();
     }
 
+    private void CaptionOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        _windowOpacity = WindowOpacityController.Normalize(CaptionOpacitySlider.Value / 100);
+        ApplyWindowOpacity();
+        RaiseSettingsChanged();
+    }
+
     private void SensitiveWindowProtectionService_StatusChanged(object? sender, SensitiveWindowProtectionSummary summary)
     {
         Dispatcher.BeginInvoke(() => UpdateSensitiveWindowProtectionIndicator(_sensitiveWindowProtectionService.GetStatus(this)));
@@ -331,6 +373,44 @@ public partial class OverlayWindow : Window
         }
 
         SetWindowLong(hwnd, GwlExStyle, style);
+    }
+
+    private void ApplyWindowOpacity()
+    {
+        Opacity = WindowOpacityController.Normalize(_windowOpacity);
+    }
+
+    private void AttachHwndHook()
+    {
+        if (_hwndSource is not null)
+        {
+            return;
+        }
+
+        _hwndSource = HwndSource.FromVisual(this) as HwndSource;
+        _hwndSource?.AddHook(OverlayWindowProc);
+    }
+
+    private void DetachHwndHook()
+    {
+        if (_hwndSource is null)
+        {
+            return;
+        }
+
+        _hwndSource.RemoveHook(OverlayWindowProc);
+        _hwndSource = null;
+    }
+
+    private IntPtr OverlayWindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (_clickThrough && msg == WmNcHitTest)
+        {
+            handled = true;
+            return new IntPtr(HtTransparent);
+        }
+
+        return IntPtr.Zero;
     }
 
     private void ApplyVisiblePosition(double savedLeft, double savedTop)

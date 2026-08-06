@@ -17,7 +17,11 @@ public interface ISensitiveWindowProtectionService
 
     void Register(Window window, string purpose);
 
+    void RegisterWindowHandle(string windowId, string windowType, string purpose, Func<IntPtr> getHwnd);
+
     void Unregister(Window window);
+
+    void UnregisterWindowHandle(string windowId);
 
     void SetEnabled(bool enabled);
 
@@ -36,6 +40,7 @@ public sealed class SensitiveWindowProtectionService : ISensitiveWindowProtectio
     private const int PbtApmResumeAutomatic = 0x0012;
 
     private readonly Dictionary<Window, WindowRegistration> _windows = new();
+    private readonly HashSet<string> _nativeWindowIds = new(StringComparer.Ordinal);
     private readonly SensitiveWindowProtectionRegistry _registry;
     private bool _disposed;
 
@@ -92,6 +97,15 @@ public sealed class SensitiveWindowProtectionService : ISensitiveWindowProtectio
         RaiseStatusChanged();
     }
 
+    public void RegisterWindowHandle(string windowId, string windowType, string purpose, Func<IntPtr> getHwnd)
+    {
+        ThrowIfDisposed();
+
+        _nativeWindowIds.Add(windowId);
+        _registry.Register(windowId, windowType, purpose, getHwnd);
+        RaiseStatusChanged();
+    }
+
     public void Unregister(Window window)
     {
         if (!_windows.Remove(window, out var registration))
@@ -105,6 +119,17 @@ public sealed class SensitiveWindowProtectionService : ISensitiveWindowProtectio
         window.Closed -= Window_Closed;
         DetachHwndHook(registration);
         _registry.Unregister(registration.WindowId);
+        RaiseStatusChanged();
+    }
+
+    public void UnregisterWindowHandle(string windowId)
+    {
+        if (!_nativeWindowIds.Remove(windowId))
+        {
+            return;
+        }
+
+        _registry.Unregister(windowId);
         RaiseStatusChanged();
     }
 
@@ -153,6 +178,11 @@ public sealed class SensitiveWindowProtectionService : ISensitiveWindowProtectio
         foreach (var window in _windows.Keys.ToArray())
         {
             Unregister(window);
+        }
+
+        foreach (var windowId in _nativeWindowIds.ToArray())
+        {
+            UnregisterWindowHandle(windowId);
         }
     }
 

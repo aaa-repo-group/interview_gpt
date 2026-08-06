@@ -14,21 +14,76 @@ public partial class SettingsWindow : Window
     public event Action<bool>? SensitiveWindowProtectionChanged;
     public event Action<HotKeySettings>? HotKeysChanged;
     public event Action<bool>? CaptionAlwaysAboveMainWindowChanged;
+    public event Action<double>? MainWindowOpacityChanged;
+    public event Action<bool>? MainWindowClickThroughChanged;
+    public event Action<double>? CaptionWindowOpacityChanged;
 
     public SettingsWindow()
     {
         InitializeComponent();
     }
 
-    public void LoadFrom(PrivacySettings privacy, SensitiveWindowProtectionSummary summary, OverlaySettings overlay, HotKeySettings hotKeys)
+    public void LoadFrom(
+        PrivacySettings privacy,
+        SensitiveWindowProtectionSummary summary,
+        OverlaySettings overlay,
+        HotKeySettings hotKeys,
+        double mainWindowOpacity,
+        bool mainWindowClickThrough = false)
     {
         _loading = true;
         SensitiveWindowProtectionCheckBox.IsChecked = privacy.SensitiveWindowProtectionEnabled;
         CaptionAlwaysAboveMainCheckBox.IsChecked = overlay.KeepAboveMainWindow;
+        MainWindowOpacitySlider.Value = ToPercent(mainWindowOpacity);
+        MainWindowClickThroughCheckBox.IsChecked = mainWindowClickThrough;
+        CaptionWindowOpacitySlider.Value = ToPercent(overlay.WindowOpacity);
+        UpdateOpacityText(MainWindowOpacityText, MainWindowOpacitySlider.Value);
+        UpdateOpacityText(CaptionWindowOpacityText, CaptionWindowOpacitySlider.Value);
         ToggleOverlayHotKeyTextBox.Text = hotKeys.ToggleOverlay;
+        ToggleMainWindowHotKeyTextBox.Text = hotKeys.ToggleMainWindow;
+        ToggleAllWindowsHotKeyTextBox.Text = hotKeys.ToggleAllWindows;
+        ToggleMainClickThroughHotKeyTextBox.Text = hotKeys.ToggleMainClickThrough;
+        ToggleCaptionClickThroughHotKeyTextBox.Text = hotKeys.ToggleCaptionClickThrough;
+        IncreaseMainOpacityHotKeyTextBox.Text = hotKeys.IncreaseMainOpacity;
+        DecreaseMainOpacityHotKeyTextBox.Text = hotKeys.DecreaseMainOpacity;
+        IncreaseCaptionOpacityHotKeyTextBox.Text = hotKeys.IncreaseCaptionOpacity;
+        DecreaseCaptionOpacityHotKeyTextBox.Text = hotKeys.DecreaseCaptionOpacity;
+        IncreaseCaptionFontSizeHotKeyTextBox.Text = hotKeys.IncreaseCaptionFontSize;
+        DecreaseCaptionFontSizeHotKeyTextBox.Text = hotKeys.DecreaseCaptionFontSize;
+        ToggleCaptionAboveMainHotKeyTextBox.Text = hotKeys.ToggleCaptionAboveMain;
+        ToggleCaptureProtectionHotKeyTextBox.Text = hotKeys.ToggleCaptureProtection;
         _loading = false;
 
         SetSensitiveWindowProtectionStatus(summary);
+    }
+
+    public void SetMainWindowOpacity(double opacity)
+    {
+        _loading = true;
+        MainWindowOpacitySlider.Value = ToPercent(opacity);
+        UpdateOpacityText(MainWindowOpacityText, MainWindowOpacitySlider.Value);
+        _loading = false;
+    }
+
+    public void SetMainWindowClickThrough(bool enabled)
+    {
+        _loading = true;
+        MainWindowClickThroughCheckBox.IsChecked = enabled;
+        _loading = false;
+    }
+
+    public void SetSensitiveWindowProtectionChecked(bool enabled)
+    {
+        _loading = true;
+        SensitiveWindowProtectionCheckBox.IsChecked = enabled;
+        _loading = false;
+    }
+
+    public void SetCaptionAlwaysAboveMainWindow(bool enabled)
+    {
+        _loading = true;
+        CaptionAlwaysAboveMainCheckBox.IsChecked = enabled;
+        _loading = false;
     }
 
     public void SetSensitiveWindowProtectionStatus(SensitiveWindowProtectionSummary summary)
@@ -76,6 +131,42 @@ public partial class SettingsWindow : Window
         CaptionAlwaysAboveMainWindowChanged?.Invoke(CaptionAlwaysAboveMainCheckBox.IsChecked == true);
     }
 
+    private void MainWindowOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (MainWindowOpacityText is not null)
+        {
+            UpdateOpacityText(MainWindowOpacityText, e.NewValue);
+        }
+
+        if (!_loading)
+        {
+            MainWindowOpacityChanged?.Invoke(FromPercent(e.NewValue));
+        }
+    }
+
+    private void MainWindowClickThroughCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        MainWindowClickThroughChanged?.Invoke(MainWindowClickThroughCheckBox.IsChecked == true);
+    }
+
+    private void CaptionWindowOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (CaptionWindowOpacityText is not null)
+        {
+            UpdateOpacityText(CaptionWindowOpacityText, e.NewValue);
+        }
+
+        if (!_loading)
+        {
+            CaptionWindowOpacityChanged?.Invoke(FromPercent(e.NewValue));
+        }
+    }
+
     private void HotKeyTextBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         e.Handled = true;
@@ -111,7 +202,19 @@ public partial class SettingsWindow : Window
 
         HotKeysChanged?.Invoke(new HotKeySettings
         {
-            ToggleOverlay = ToggleOverlayHotKeyTextBox.Text.Trim()
+            ToggleOverlay = ToggleOverlayHotKeyTextBox.Text.Trim(),
+            ToggleMainWindow = ToggleMainWindowHotKeyTextBox.Text.Trim(),
+            ToggleAllWindows = ToggleAllWindowsHotKeyTextBox.Text.Trim(),
+            ToggleMainClickThrough = ToggleMainClickThroughHotKeyTextBox.Text.Trim(),
+            ToggleCaptionClickThrough = ToggleCaptionClickThroughHotKeyTextBox.Text.Trim(),
+            IncreaseMainOpacity = IncreaseMainOpacityHotKeyTextBox.Text.Trim(),
+            DecreaseMainOpacity = DecreaseMainOpacityHotKeyTextBox.Text.Trim(),
+            IncreaseCaptionOpacity = IncreaseCaptionOpacityHotKeyTextBox.Text.Trim(),
+            DecreaseCaptionOpacity = DecreaseCaptionOpacityHotKeyTextBox.Text.Trim(),
+            IncreaseCaptionFontSize = IncreaseCaptionFontSizeHotKeyTextBox.Text.Trim(),
+            DecreaseCaptionFontSize = DecreaseCaptionFontSizeHotKeyTextBox.Text.Trim(),
+            ToggleCaptionAboveMain = ToggleCaptionAboveMainHotKeyTextBox.Text.Trim(),
+            ToggleCaptureProtection = ToggleCaptureProtectionHotKeyTextBox.Text.Trim()
         });
     }
 
@@ -160,6 +263,21 @@ public partial class SettingsWindow : Window
 
         parts.Add(key.ToString());
         return string.Join("+", parts);
+    }
+
+    private static double ToPercent(double opacity)
+    {
+        return Math.Round(WindowOpacityController.Normalize(opacity) * 100, MidpointRounding.AwayFromZero);
+    }
+
+    private static double FromPercent(double percent)
+    {
+        return WindowOpacityController.Normalize(percent / 100);
+    }
+
+    private static void UpdateOpacityText(TextBlock textBlock, double percent)
+    {
+        textBlock.Text = Math.Round(percent, MidpointRounding.AwayFromZero).ToString("0") + "%";
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)

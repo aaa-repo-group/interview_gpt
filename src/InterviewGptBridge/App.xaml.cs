@@ -2,12 +2,14 @@ using System.Threading;
 using System.Windows;
 using InterviewGptBridge.Licensing;
 using InterviewGptBridge.Services;
+using Forms = System.Windows.Forms;
 
 namespace InterviewGptBridge;
 
 public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstanceMutex;
+    private NativeMainForm? _mainForm;
     private bool _ownsSingleInstanceMutex;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -23,6 +25,8 @@ public partial class App : System.Windows.Application
         }
 
         base.OnStartup(e);
+        Forms.Application.EnableVisualStyles();
+        Forms.Application.SetCompatibleTextRenderingDefault(false);
 
 #if !NO_LICENSE
         if (!AuthorizeDevice())
@@ -32,13 +36,15 @@ public partial class App : System.Windows.Application
         }
 #endif
 
-        var mainWindow = new MainWindow();
-        MainWindow = mainWindow;
-        mainWindow.Show();
+        _mainForm = new NativeMainForm();
+        _mainForm.Show();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _mainForm?.Dispose();
+        _mainForm = null;
+
         if (_ownsSingleInstanceMutex)
         {
             _singleInstanceMutex?.ReleaseMutex();

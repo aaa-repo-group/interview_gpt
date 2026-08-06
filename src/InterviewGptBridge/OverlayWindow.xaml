@@ -1,7 +1,7 @@
 <Window x:Class="InterviewGptBridge.OverlayWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Caption Bridge"
+        Title="ThanksAAA"
         Width="680"
         Height="280"
         MinWidth="360"
@@ -26,8 +26,11 @@
                  Background="#151922"
                  Foreground="#F4F7FB"
                  CaretBrush="#F4F7FB"
+                 Cursor="Arrow"
+                 ForceCursor="True"
                  FontFamily="Segoe UI"
                  FontSize="18"
+                 IsReadOnly="True"
                  AcceptsReturn="False"
                  AcceptsTab="False"
                  VerticalScrollBarVisibility="Auto"
@@ -45,6 +48,8 @@
             <Grid Margin="8,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="8" />
+                    <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <Slider x:Name="FontSizeSlider"
                         Grid.Column="0"
@@ -52,7 +57,16 @@
                         Minimum="12"
                         Maximum="36"
                         TickFrequency="1"
+                        ToolTip="Caption font size"
                         ValueChanged="FontSizeSlider_ValueChanged" />
+                <Slider x:Name="CaptionOpacitySlider"
+                        Grid.Column="2"
+                        VerticalAlignment="Center"
+                        Minimum="0"
+                        Maximum="100"
+                        TickFrequency="1"
+                        ToolTip="Caption window opacity"
+                        ValueChanged="CaptionOpacitySlider_ValueChanged" />
             </Grid>
         </Border>
     </Grid>

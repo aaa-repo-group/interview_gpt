@@ -30,12 +30,14 @@ public partial class MainWindow : Window
     private readonly SettingsStore _settingsStore = new();
     private readonly ISensitiveWindowProtectionService _sensitiveWindowProtectionService = new SensitiveWindowProtectionService();
     private readonly DispatcherTimer _chatReadyProbeTimer;
+    private readonly DispatcherTimer _opacityReapplyTimer;
     private readonly TrayController _trayController;
     private AppSettings _settings;
     private LiveCaptionWatcher? _captionWatcher;
     private OverlayWindow? _overlayWindow;
     private SettingsWindow? _settingsWindow;
     private HwndSource? _hotKeySource;
+    private int _opacityReapplyTicksRemaining;
     private bool _overlayStarted;
     private bool _isExiting;
     private bool _servicesShutdown;
@@ -68,6 +70,12 @@ public partial class MainWindow : Window
         };
         _chatReadyProbeTimer.Tick += async (_, _) => await ProbeChatGptReadyAsync();
 
+        _opacityReapplyTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(750)
+        };
+        _opacityReapplyTimer.Tick += (_, _) => ReapplyMainWindowOpacityFromTimer();
+
         Loaded += async (_, _) =>
         {
             LiveCaptionsLauncher.LaunchAfterDelay(Dispatcher, TimeSpan.FromMilliseconds(700));
@@ -89,6 +97,8 @@ public partial class MainWindow : Window
         _settings.HotKeys ??= new HotKeySettings();
         _settings.Privacy ??= new PrivacySettings();
         _settings.License ??= new LicenseSettings();
+        _settings.MainWindowOpacity = WindowOpacityController.Normalize(_settings.MainWindowOpacity);
+        _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(_settings.Overlay.WindowOpacity);
 
         if (!_settings.Privacy.SensitiveWindowProtectionUserConfigured)
         {
@@ -111,11 +121,6 @@ public partial class MainWindow : Window
             _settingsStore.Save(_settings);
         }
 
-        if (_settings.Overlay.ClickThrough)
-        {
-            _settings.Overlay.ClickThrough = false;
-            _settingsStore.Save(_settings);
-        }
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -123,6 +128,8 @@ public partial class MainWindow : Window
         _hotKeySource = HwndSource.FromVisual(this) as HwndSource;
         _hotKeySource?.AddHook(HotKeyWindowProc);
         RegisterOverlayHotKeys();
+        ApplyMainWindowOpacity();
+        QueueMainWindowOpacityReapplyBurst();
     }
 
     private async Task InitializeBrowserAsync()
@@ -148,8 +155,13 @@ public partial class MainWindow : Window
             Browser.CoreWebView2.Settings.IsStatusBarEnabled = false;
             Browser.CoreWebView2.Settings.AreDefaultContextMenusEnabled = !_settings.Privacy.SensitiveWindowProtectionEnabled;
             Browser.CoreWebView2.NewWindowRequested += Browser_NewWindowRequested;
-            Browser.CoreWebView2.NavigationCompleted += (_, _) => _chatReadyProbeTimer.Start();
+            Browser.CoreWebView2.NavigationCompleted += (_, _) =>
+            {
+                _chatReadyProbeTimer.Start();
+                QueueMainWindowOpacityReapplyBurst();
+            };
             Browser.Source = new Uri("https://chatgpt.com/");
+            QueueMainWindowOpacityReapplyBurst();
             _sensitiveWindowProtectionService.ReapplyAll();
         }
         catch (Exception ex)
@@ -323,6 +335,20 @@ public partial class MainWindow : Window
         RegisterOverlayHotKeys();
     }
 
+    private void SetMainWindowOpacity(double opacity)
+    {
+        _settings.MainWindowOpacity = WindowOpacityController.Normalize(opacity);
+        _settingsStore.Save(_settings);
+        ApplyMainWindowOpacity();
+    }
+
+    private void SetOverlayWindowOpacity(double opacity)
+    {
+        _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(opacity);
+        _settingsStore.Save(_settings);
+        _overlayWindow?.SetWindowOpacity(_settings.Overlay.WindowOpacity);
+    }
+
     private void SetCaptionAlwaysAboveMainWindow(bool enabled)
     {
         _settings.Overlay.KeepAboveMainWindow = enabled;
@@ -373,6 +399,47 @@ public partial class MainWindow : Window
     private void ShowBrowserContent()
     {
         Browser.Visibility = Visibility.Visible;
+    }
+
+    private void ApplyMainWindowOpacity()
+    {
+        WindowOpacityController.ApplyWindowTree(this, _settings.MainWindowOpacity);
+
+        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity || _opacityReapplyTicksRemaining > 0)
+        {
+            if (!_opacityReapplyTimer.IsEnabled)
+            {
+                _opacityReapplyTimer.Start();
+            }
+        }
+        else
+        {
+            _opacityReapplyTimer.Stop();
+        }
+    }
+
+    private void ReapplyMainWindowOpacityFromTimer()
+    {
+        WindowOpacityController.ApplyWindowTree(this, _settings.MainWindowOpacity);
+
+        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity)
+        {
+            return;
+        }
+
+        if (_opacityReapplyTicksRemaining > 0)
+        {
+            _opacityReapplyTicksRemaining--;
+            return;
+        }
+
+        _opacityReapplyTimer.Stop();
+    }
+
+    private void QueueMainWindowOpacityReapplyBurst()
+    {
+        _opacityReapplyTicksRemaining = Math.Max(_opacityReapplyTicksRemaining, 12);
+        ApplyMainWindowOpacity();
     }
 
     private void EnsureOverlayAboveMainWindow()
@@ -541,6 +608,7 @@ public partial class MainWindow : Window
 
         _servicesShutdown = true;
         _chatReadyProbeTimer.Stop();
+        _opacityReapplyTimer.Stop();
         _captionWatcher?.Dispose();
 
         if (_overlayWindow is not null)
@@ -580,6 +648,7 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Topmost = true;
+        ApplyMainWindowOpacity();
         Activate();
         ShowBrowserContent();
         EnsureOverlayAboveMainWindow();
@@ -622,10 +691,14 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(() => SetHotKeys(hotKeys));
             _settingsWindow.CaptionAlwaysAboveMainWindowChanged += enabled =>
                 Dispatcher.BeginInvoke(() => SetCaptionAlwaysAboveMainWindow(enabled));
+            _settingsWindow.MainWindowOpacityChanged += opacity =>
+                Dispatcher.BeginInvoke(() => SetMainWindowOpacity(opacity));
+            _settingsWindow.CaptionWindowOpacityChanged += opacity =>
+                Dispatcher.BeginInvoke(() => SetOverlayWindowOpacity(opacity));
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
 
-        _settingsWindow.LoadFrom(_settings.Privacy, _sensitiveWindowProtectionService.CurrentSummary, _settings.Overlay, _settings.HotKeys);
+        _settingsWindow.LoadFrom(_settings.Privacy, _sensitiveWindowProtectionService.CurrentSummary, _settings.Overlay, _settings.HotKeys, _settings.MainWindowOpacity);
         _settingsWindow.Show();
         _settingsWindow.Activate();
     }
