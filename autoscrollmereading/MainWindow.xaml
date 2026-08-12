@@ -1,0 +1,60 @@
+<Window x:Class="AutoScrollMeReading.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AutoScroll Me Reading"
+        Width="980"
+        Height="760"
+        MinWidth="720"
+        MinHeight="560"
+        Background="#F3F4F1">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Border Grid.Row="0"
+            Background="#20262E"
+            Padding="22,16">
+      <DockPanel LastChildFill="True">
+        <StackPanel DockPanel.Dock="Right"
+                    Orientation="Horizontal"
+                    VerticalAlignment="Center">
+          <Ellipse x:Name="ListeningIndicator"
+                   Width="11"
+                   Height="11"
+                   Fill="#8E969F"
+                   Margin="0,0,9,0" />
+          <TextBlock x:Name="StatusText"
+                     Foreground="#F8FAFC"
+                     FontSize="14"
+                     VerticalAlignment="Center"
+                     Text="Starting listener..." />
+        </StackPanel>
+
+        <StackPanel>
+          <TextBlock Text="Experience Reader"
+                     Foreground="#FFFFFF"
+                     FontSize="22"
+                     FontWeight="SemiBold" />
+          <TextBlock Text="Read aloud naturally. The app follows the sentence it hears and keeps it near the center."
+                     Foreground="#C7D1DB"
+                     FontSize="13"
+                     Margin="0,3,0,0" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <ScrollViewer x:Name="ReaderScroll"
+                  Grid.Row="1"
+                  VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled"
+                  CanContentScroll="False"
+                  PanningMode="VerticalOnly">
+      <StackPanel x:Name="ContentHost"
+                  Width="760"
+                  HorizontalAlignment="Center"
+                  Margin="0,34,0,52" />
+    </ScrollViewer>
+  </Grid>
+</Window>
