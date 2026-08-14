@@ -7,6 +7,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\src\InterviewGptBridge\Services\CaptionHistoryMerger.cs"
+             Link="Services\CaptionHistoryMerger.cs" />
+    <Compile Include="..\..\src\InterviewGptBridge\Services\CaptionSelectionAnchor.cs"
+             Link="Services\CaptionSelectionAnchor.cs" />
+    <Compile Include="..\..\src\InterviewGptBridge\Services\LiveCaptionTextNormalizer.cs"
+             Link="Services\LiveCaptionTextNormalizer.cs" />
+    <Compile Include="..\..\src\InterviewGptBridge\Services\MainWindowAutoScrollLogic.cs"
+             Link="Services\MainWindowAutoScrollLogic.cs" />
     <Compile Include="..\..\src\InterviewGptBridge\Services\SensitiveWindowProtection.cs"
              Link="Services\SensitiveWindowProtection.cs" />
   </ItemGroup>

@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _chatReadyProbeTimer;
     private readonly DispatcherTimer _opacityReapplyTimer;
     private readonly TrayController _trayController;
+    private readonly object _captionUiSync = new();
     private AppSettings _settings;
     private LiveCaptionWatcher? _captionWatcher;
     private OverlayWindow? _overlayWindow;
@@ -39,12 +40,15 @@ public partial class MainWindow : Window
     private HwndSource? _hotKeySource;
     private int _opacityReapplyTicksRemaining;
     private bool _overlayStarted;
+    private string? _pendingCaptionSnapshot;
+    private bool _captionUiUpdateScheduled;
     private bool _isExiting;
     private bool _servicesShutdown;
 
     public MainWindow()
     {
         InitializeComponent();
+        AltTabWindowHider.HideFromAltTab(this);
 
         _settings = _settingsStore.Load();
         NormalizeSettings();
@@ -97,30 +101,46 @@ public partial class MainWindow : Window
         _settings.HotKeys ??= new HotKeySettings();
         _settings.Privacy ??= new PrivacySettings();
         _settings.License ??= new LicenseSettings();
-        _settings.MainWindowOpacity = WindowOpacityController.Normalize(_settings.MainWindowOpacity);
+        var settingsChanged = false;
         _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(_settings.Overlay.WindowOpacity);
+        var mainWindowOpacity = WindowOpacityController.Normalize(_settings.MainWindowOpacity);
+        if (Math.Abs(mainWindowOpacity - _settings.Overlay.WindowOpacity) > 0.001)
+        {
+            settingsChanged = true;
+        }
+
+        _settings.MainWindowOpacity = _settings.Overlay.WindowOpacity;
+        if (_settings.MainWindowClickThrough)
+        {
+            _settings.MainWindowClickThrough = false;
+            settingsChanged = true;
+        }
 
         if (!_settings.Privacy.SensitiveWindowProtectionUserConfigured)
         {
             if (!_settings.Privacy.SensitiveWindowProtectionEnabled)
             {
                 _settings.Privacy.SensitiveWindowProtectionEnabled = true;
-                _settingsStore.Save(_settings);
+                settingsChanged = true;
             }
         }
 
         if (_settings.Privacy.RedactWhenInactive)
         {
             _settings.Privacy.RedactWhenInactive = false;
-            _settingsStore.Save(_settings);
+            settingsChanged = true;
         }
 
         if (_settings.Privacy.ManualRedactionEnabled)
         {
             _settings.Privacy.ManualRedactionEnabled = false;
-            _settingsStore.Save(_settings);
+            settingsChanged = true;
         }
 
+        if (settingsChanged)
+        {
+            _settingsStore.Save(_settings);
+        }
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -223,8 +243,19 @@ public partial class MainWindow : Window
         _overlayWindow.TextSubmitted += async (_, text) => await SubmitPromptAsync(text);
         _overlayWindow.SettingsChanged += (_, overlaySettings) =>
         {
+            var normalizedOpacity = WindowOpacityController.Normalize(overlaySettings.WindowOpacity);
+            var opacityChanged = Math.Abs(_settings.MainWindowOpacity - normalizedOpacity) > 0.001;
             _settings.Overlay = overlaySettings;
+            _settings.MainWindowOpacity = normalizedOpacity;
+            _settings.MainWindowClickThrough = false;
             _settingsStore.Save(_settings);
+            if (opacityChanged)
+            {
+                _settingsWindow?.SetMainWindowOpacity(normalizedOpacity);
+                _settingsWindow?.SetCaptionWindowOpacity(normalizedOpacity);
+                ApplyMainWindowOpacity();
+                QueueMainWindowOpacityReapplyBurst();
+            }
             _trayController.SetClickThrough(overlaySettings.ClickThrough);
         };
         _overlayWindow.Show();
@@ -233,16 +264,10 @@ public partial class MainWindow : Window
         _trayController.SetOverlayAvailable(true);
         _trayController.SetClickThrough(_settings.Overlay.ClickThrough);
 
-        _captionWatcher = new LiveCaptionWatcher(TimeSpan.FromMilliseconds(_settings.CaptionPollMs));
+        _captionWatcher = new LiveCaptionWatcher(GetCaptionPollInterval());
         _captionWatcher.CaptionChanged += (_, snapshot) =>
         {
-            Dispatcher.BeginInvoke(() =>
-            {
-                if (!_isExiting)
-                {
-                    _overlayWindow?.UpdateCaption(snapshot);
-                }
-            });
+            QueueCaptionSnapshot(snapshot);
         };
         _captionWatcher.StatusChanged += (_, status) =>
         {
@@ -266,6 +291,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private TimeSpan GetCaptionPollInterval()
+    {
+        return TimeSpan.FromMilliseconds(Math.Clamp(_settings.CaptionPollMs, 45, 70));
+    }
+
+    private void QueueCaptionSnapshot(string snapshot)
+    {
+        var shouldSchedule = false;
+        lock (_captionUiSync)
+        {
+            _pendingCaptionSnapshot = snapshot;
+            if (!_captionUiUpdateScheduled)
+            {
+                _captionUiUpdateScheduled = true;
+                shouldSchedule = true;
+            }
+        }
+
+        if (shouldSchedule)
+        {
+            Dispatcher.BeginInvoke(FlushPendingCaptionSnapshot);
+        }
+    }
+
+    private void FlushPendingCaptionSnapshot()
+    {
+        string? snapshot;
+        lock (_captionUiSync)
+        {
+            snapshot = _pendingCaptionSnapshot;
+            _pendingCaptionSnapshot = null;
+            _captionUiUpdateScheduled = false;
+        }
+
+        if (!_isExiting && !string.IsNullOrWhiteSpace(snapshot))
+        {
+            _overlayWindow?.UpdateCaption(snapshot);
+        }
+
+        var shouldScheduleAgain = false;
+        lock (_captionUiSync)
+        {
+            if (_pendingCaptionSnapshot is not null && !_captionUiUpdateScheduled)
+            {
+                _captionUiUpdateScheduled = true;
+                shouldScheduleAgain = true;
+            }
+        }
+
+        if (shouldScheduleAgain)
+        {
+            Dispatcher.BeginInvoke(FlushPendingCaptionSnapshot);
+        }
+    }
+ 
     private async Task SubmitPromptAsync(string text)
     {
         if (Browser.CoreWebView2 is null || string.IsNullOrWhiteSpace(text))
@@ -295,7 +375,7 @@ public partial class MainWindow : Window
     private void ShowStatus(string message)
     {
         StatusText.Text = message;
-        StatusBanner.Visibility = Visibility.Visible;
+        StatusBanner.Visibility = Visibility.Collapsed;
     }
 
     private void HideStatus()
@@ -337,16 +417,21 @@ public partial class MainWindow : Window
 
     private void SetMainWindowOpacity(double opacity)
     {
-        _settings.MainWindowOpacity = WindowOpacityController.Normalize(opacity);
-        _settingsStore.Save(_settings);
-        ApplyMainWindowOpacity();
+        SetOverlayWindowOpacity(opacity);
     }
 
     private void SetOverlayWindowOpacity(double opacity)
     {
-        _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(opacity);
+        var normalizedOpacity = WindowOpacityController.Normalize(opacity);
+        _settings.Overlay.WindowOpacity = normalizedOpacity;
+        _settings.MainWindowOpacity = normalizedOpacity;
+        _settings.MainWindowClickThrough = false;
         _settingsStore.Save(_settings);
-        _overlayWindow?.SetWindowOpacity(_settings.Overlay.WindowOpacity);
+        _settingsWindow?.SetMainWindowOpacity(normalizedOpacity);
+        _settingsWindow?.SetCaptionWindowOpacity(normalizedOpacity);
+        _overlayWindow?.SetWindowOpacity(normalizedOpacity);
+        ApplyMainWindowOpacity();
+        QueueMainWindowOpacityReapplyBurst();
     }
 
     private void SetCaptionAlwaysAboveMainWindow(bool enabled)
@@ -363,14 +448,7 @@ public partial class MainWindow : Window
 
     private void UpdateSensitiveWindowProtectionIndicator(SensitiveWindowProtectionSummary summary)
     {
-        if (!summary.Enabled)
-        {
-            ProtectionBanner.Visibility = Visibility.Collapsed;
-            ProtectionStatusText.ToolTip = null;
-            return;
-        }
-
-        ProtectionBanner.Visibility = Visibility.Visible;
+        ProtectionBanner.Visibility = Visibility.Collapsed;
         ProtectionStatusText.ToolTip = summary.Message;
 
         if (summary.IsProtected)
@@ -405,7 +483,7 @@ public partial class MainWindow : Window
     {
         WindowOpacityController.ApplyWindowTree(this, _settings.MainWindowOpacity);
 
-        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity || _opacityReapplyTicksRemaining > 0)
+        if (_opacityReapplyTicksRemaining > 0)
         {
             if (!_opacityReapplyTimer.IsEnabled)
             {
@@ -422,11 +500,6 @@ public partial class MainWindow : Window
     {
         WindowOpacityController.ApplyWindowTree(this, _settings.MainWindowOpacity);
 
-        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity)
-        {
-            return;
-        }
-
         if (_opacityReapplyTicksRemaining > 0)
         {
             _opacityReapplyTicksRemaining--;
@@ -438,7 +511,7 @@ public partial class MainWindow : Window
 
     private void QueueMainWindowOpacityReapplyBurst()
     {
-        _opacityReapplyTicksRemaining = Math.Max(_opacityReapplyTicksRemaining, 12);
+        _opacityReapplyTicksRemaining = Math.Max(_opacityReapplyTicksRemaining, 4);
         ApplyMainWindowOpacity();
     }
 
@@ -645,12 +718,19 @@ public partial class MainWindow : Window
 
     private void ShowMainWindow()
     {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+        {
+            AltTabWindowHider.HideFromAltTab(handle);
+        }
+
         Show();
         WindowState = WindowState.Normal;
         Topmost = true;
         ApplyMainWindowOpacity();
         Activate();
         ShowBrowserContent();
+        Browser.Focus();
         EnsureOverlayAboveMainWindow();
     }
 

@@ -5,11 +5,16 @@ namespace InterviewGptBridge.Services;
 
 public sealed class LiveCaptionWatcher : IDisposable
 {
+    private const int MaxCollectDepth = 11;
+    private const int MaxCollectMilliseconds = 85;
+
     private readonly TimeSpan _pollInterval;
     private readonly object _sync = new();
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _pollTask;
     private AutomationElement? _captionWindow;
+    private List<AutomationElement> _captionTextLeaves = [];
+    private int _cachedReadsSinceDiscovery;
     private string _lastCaption = string.Empty;
     private string _lastStatus = string.Empty;
 
@@ -41,6 +46,8 @@ public sealed class LiveCaptionWatcher : IDisposable
         {
             _cancellationTokenSource?.Cancel();
             _captionWindow = null;
+            _captionTextLeaves.Clear();
+            _cachedReadsSinceDiscovery = 0;
         }
     }
 
@@ -56,6 +63,10 @@ public sealed class LiveCaptionWatcher : IDisposable
                 {
                     _lastCaption = caption;
                     CaptionChanged?.Invoke(this, caption);
+                }
+                else if (string.IsNullOrWhiteSpace(caption))
+                {
+                    _lastCaption = string.Empty;
                 }
 
                 SetStatus(string.IsNullOrWhiteSpace(caption)
@@ -102,10 +113,44 @@ public sealed class LiveCaptionWatcher : IDisposable
             return string.Empty;
         }
 
-        var stopwatch = Stopwatch.StartNew();
         var candidates = new List<string>();
-        CollectText(window, candidates, depth: 0, stopwatch);
-        return Normalize(candidates);
+        if (_cachedReadsSinceDiscovery < 20)
+        {
+            ReadCachedTextLeaves(candidates);
+            if (candidates.Count > 0)
+            {
+                _cachedReadsSinceDiscovery++;
+            }
+        }
+
+        var discoveredLeaves = new List<AutomationElement>();
+        if (candidates.Count == 0)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            CollectText(window, candidates, discoveredLeaves, depth: 0, stopwatch);
+        }
+
+        if (candidates.Count == 0)
+        {
+            var fallback = TryReadTextPattern(window);
+            if (!string.IsNullOrWhiteSpace(fallback))
+            {
+                candidates.Add(fallback);
+            }
+        }
+
+        if (discoveredLeaves.Count > 0)
+        {
+            _captionTextLeaves = discoveredLeaves;
+            _cachedReadsSinceDiscovery = 0;
+        }
+        else if (candidates.Count == 0)
+        {
+            _captionTextLeaves.Clear();
+            _cachedReadsSinceDiscovery = 0;
+        }
+
+        return LiveCaptionTextNormalizer.NormalizeSnapshot(candidates);
     }
 
     private AutomationElement? GetLiveCaptionWindow()
@@ -116,6 +161,8 @@ public sealed class LiveCaptionWatcher : IDisposable
         }
 
         _captionWindow = null;
+        _captionTextLeaves.Clear();
+        _cachedReadsSinceDiscovery = 0;
         var windows = AutomationElement.RootElement.FindAll(
             TreeScope.Children,
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
@@ -165,16 +212,37 @@ public sealed class LiveCaptionWatcher : IDisposable
         }
     }
 
-    private static void CollectText(AutomationElement root, List<string> candidates, int depth, Stopwatch stopwatch)
+    private void ReadCachedTextLeaves(List<string> candidates)
     {
-        if (depth > 8 || stopwatch.ElapsedMilliseconds > 80)
+        if (_captionTextLeaves.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var element in _captionTextLeaves.ToArray())
+        {
+            if (TryReadCaptionTextLeaf(element, out var text))
+            {
+                candidates.Add(text);
+            }
+        }
+    }
+
+    private static void CollectText(
+        AutomationElement root,
+        List<string> candidates,
+        List<AutomationElement> discoveredLeaves,
+        int depth,
+        Stopwatch stopwatch)
+    {
+        if (depth > MaxCollectDepth || stopwatch.ElapsedMilliseconds > MaxCollectMilliseconds)
         {
             return;
         }
 
         try
         {
-            if (TryAppendElementText(root, candidates))
+            if (TryAppendElementText(root, candidates, discoveredLeaves))
             {
                 return;
             }
@@ -182,8 +250,8 @@ public sealed class LiveCaptionWatcher : IDisposable
             var walker = TreeWalker.ControlViewWalker;
             for (var child = walker.GetFirstChild(root); child is not null; child = walker.GetNextSibling(child))
             {
-                CollectText(child, candidates, depth + 1, stopwatch);
-                if (stopwatch.ElapsedMilliseconds > 80)
+                CollectText(child, candidates, discoveredLeaves, depth + 1, stopwatch);
+                if (stopwatch.ElapsedMilliseconds > MaxCollectMilliseconds)
                 {
                     return;
                 }
@@ -197,7 +265,10 @@ public sealed class LiveCaptionWatcher : IDisposable
         }
     }
 
-    private static bool TryAppendElementText(AutomationElement element, List<string> candidates)
+    private static bool TryAppendElementText(
+        AutomationElement element,
+        List<string> candidates,
+        List<AutomationElement> discoveredLeaves)
     {
         try
         {
@@ -212,24 +283,21 @@ public sealed class LiveCaptionWatcher : IDisposable
                 return true;
             }
 
-            var text = TryReadTextPattern(element);
-            if (!string.IsNullOrWhiteSpace(text))
+            if (controlType == ControlType.Document)
             {
-                candidates.Add(text);
-                return true;
+                return false;
             }
 
-            if (controlType == ControlType.Text ||
-                controlType == ControlType.Document ||
-                controlType == ControlType.Edit)
+            if (IsCaptionTextLeaf(controlType))
             {
-                text = element.Current.Name;
-                if (!string.IsNullOrWhiteSpace(text))
+                if (TryReadCaptionTextLeaf(element, out var text))
                 {
                     candidates.Add(text);
+                    discoveredLeaves.Add(element);
+                    return true;
                 }
 
-                return true;
+                return false;
             }
         }
         catch
@@ -239,6 +307,37 @@ public sealed class LiveCaptionWatcher : IDisposable
         return false;
     }
 
+    private static bool IsCaptionTextLeaf(ControlType controlType)
+    {
+        return controlType == ControlType.Text ||
+               controlType == ControlType.Edit;
+    }
+
+    private static bool TryReadCaptionTextLeaf(AutomationElement element, out string text)
+    {
+        text = string.Empty;
+
+        try
+        {
+            text = element.Current.Name;
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                return true;
+            }
+
+            text = TryReadTextPattern(element);
+            return !string.IsNullOrWhiteSpace(text);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static string TryReadTextPattern(AutomationElement element)
     {
         try
@@ -246,7 +345,7 @@ public sealed class LiveCaptionWatcher : IDisposable
             if (element.TryGetCurrentPattern(TextPattern.Pattern, out var pattern) &&
                 pattern is TextPattern textPattern)
             {
-                return textPattern.DocumentRange.GetText(4000) ?? string.Empty;
+                return textPattern.DocumentRange.GetText(1200) ?? string.Empty;
             }
         }
         catch
@@ -256,100 +355,4 @@ public sealed class LiveCaptionWatcher : IDisposable
         return string.Empty;
     }
 
-    private static string Normalize(IEnumerable<string> values)
-    {
-        var lines = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var value in values)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                continue;
-            }
-
-            foreach (var rawLine in value.Replace("\r", "\n", StringComparison.Ordinal).Split('\n'))
-            {
-                var line = NormalizeLine(rawLine);
-                if (string.IsNullOrWhiteSpace(line) || IsUiChromeLine(line))
-                {
-                    continue;
-                }
-
-                line = CollapseRepeatedSingleLine(line);
-                if (seen.Add(line))
-                {
-                    lines.Add(line);
-                }
-            }
-        }
-
-        return string.Join(' ', lines).Trim();
-    }
-
-    private static string Normalize(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return string.Empty;
-        }
-
-        var rawLines = value
-            .Replace("\r", "\n", StringComparison.Ordinal)
-            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        var lines = new List<string>();
-        string? previous = null;
-        foreach (var line in rawLines)
-        {
-            var normalizedLine = NormalizeLine(line);
-            if (string.IsNullOrWhiteSpace(normalizedLine) ||
-                string.Equals(normalizedLine, previous, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            lines.Add(normalizedLine);
-            previous = normalizedLine;
-        }
-
-        return string.Join(' ', lines).Trim();
-    }
-
-    private static string NormalizeLine(string value)
-    {
-        return string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim();
-    }
-
-    private static bool IsUiChromeLine(string line)
-    {
-        return line.Equals("Live captions", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Live Captions", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Settings", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Pause", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Resume", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Close", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Minimize", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Dock", StringComparison.OrdinalIgnoreCase) ||
-               line.Equals("Undock", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string CollapseRepeatedSingleLine(string line)
-    {
-        var words = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length < 4 || words.Length % 2 != 0)
-        {
-            return line;
-        }
-
-        var half = words.Length / 2;
-        for (var index = 0; index < half; index++)
-        {
-            if (!string.Equals(words[index], words[index + half], StringComparison.OrdinalIgnoreCase))
-            {
-                return line;
-            }
-        }
-
-        return string.Join(' ', words.Take(half));
-    }
 }

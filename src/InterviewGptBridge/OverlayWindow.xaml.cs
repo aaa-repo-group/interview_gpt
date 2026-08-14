@@ -45,6 +45,7 @@ public partial class OverlayWindow : Window
     {
         _sensitiveWindowProtectionService = sensitiveWindowProtectionService;
         InitializeComponent();
+        AltTabWindowHider.HideFromAltTab(this);
         LocationChanged += (_, _) => RaiseSettingsChanged();
         SizeChanged += (_, _) => RaiseSettingsChanged();
         Loaded += (_, _) => AttachCaptionScrollViewer();

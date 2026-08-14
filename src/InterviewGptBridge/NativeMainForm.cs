@@ -14,6 +14,7 @@ namespace InterviewGptBridge;
 
 public sealed class NativeMainForm : Forms.Form
 {
+    private const int MaxCaptionSnapshotQueue = 24;
     private const string MainWindowRegistrationId = "NativeMainForm#Main";
     private const string FooterWindowRegistrationId = "NativeMainForm#Footer";
     private const int WmHotKey = 0x0312;
@@ -62,15 +63,21 @@ public sealed class NativeMainForm : Forms.Form
     private readonly Forms.ToolTip _toolTip = new();
     private readonly Forms.Timer _chatReadyProbeTimer;
     private readonly Forms.Timer _opacityReapplyTimer;
+    private readonly Forms.Timer _captionFlushTimer;
     private readonly TrayController _trayController;
+    private readonly object _captionUiSync = new();
+    private readonly Queue<string> _pendingCaptionSnapshots = new();
     private AppSettings _settings;
     private LiveCaptionWatcher? _captionWatcher;
+    private MainWindowAutoScrollReader? _mainWindowAutoScrollReader;
     private NativeOverlayForm? _overlayWindow;
     private SettingsWindow? _settingsWindow;
     private int _opacityReapplyTicksRemaining;
     private bool _mainWindowClickThrough;
     private bool _syncingFooterControls;
     private bool _overlayStarted;
+    private bool _captionUiUpdateScheduled;
+    private string _lastQueuedCaptionSnapshot = string.Empty;
     private bool _isExiting;
     private bool _servicesShutdown;
     private readonly HashSet<int> _registeredHotKeyIds = new();
@@ -79,7 +86,8 @@ public sealed class NativeMainForm : Forms.Form
     {
         _settings = _settingsStore.Load();
         NormalizeSettings();
-        _mainWindowClickThrough = _settings.MainWindowClickThrough;
+        _mainWindowClickThrough = false;
+        AltTabWindowHider.HideFromAltTab(this);
 
         InitializeNativeUi();
         TopMost = true;
@@ -88,6 +96,7 @@ public sealed class NativeMainForm : Forms.Form
         _trayController.ShowMainRequested += (_, _) => BeginOnUi(ShowMainWindow);
         _trayController.ShowOverlayRequested += (_, _) => BeginOnUi(ShowOverlayWindow);
         _trayController.SettingsRequested += (_, _) => BeginOnUi(ShowSettingsWindow);
+        _trayController.CopyAutoScrollDebugRequested += (_, _) => BeginOnUi(CopyAutoScrollDebugToClipboard);
         _trayController.HideAllRequested += (_, _) => BeginOnUi(HideAllWindows);
         _trayController.ClickThroughChanged += enabled => BeginOnUi(() => SetOverlayClickThrough(enabled));
         _trayController.ExitRequested += (_, _) => BeginOnUi(ExitApplication);
@@ -119,6 +128,12 @@ public sealed class NativeMainForm : Forms.Form
         };
         _opacityReapplyTimer.Tick += (_, _) => ReapplyMainWindowOpacityFromTimer();
 
+        _captionFlushTimer = new Forms.Timer
+        {
+            Interval = 25
+        };
+        _captionFlushTimer.Tick += (_, _) => FlushPendingCaptionSnapshot();
+
         Load += async (_, _) =>
         {
             LiveCaptionsLauncher.LaunchAfterDelay(System.Windows.Application.Current.Dispatcher, TimeSpan.FromMilliseconds(700));
@@ -128,14 +143,12 @@ public sealed class NativeMainForm : Forms.Form
         Shown += (_, _) =>
         {
             RegisterOverlayHotKeys();
-            ShowFooterWindow();
             ApplyMainWindowOpacity();
             QueueMainWindowOpacityReapplyBurst();
         };
         Activated += (_, _) =>
         {
             _sensitiveWindowProtectionService.ReapplyAll();
-            ShowFooterWindow();
             EnsureOverlayAboveMainWindow();
         };
         HandleCreated += (_, _) =>
@@ -193,6 +206,7 @@ public sealed class NativeMainForm : Forms.Form
                 _footerWindow.TopMost = true;
             }
         };
+        AltTabWindowHider.HideFromAltTab(_footerWindow);
         _footerWindow.HandleCreated += (_, _) => _sensitiveWindowProtectionService.ReapplyAll();
         _footerWindow.VisibleChanged += (_, _) =>
         {
@@ -306,51 +320,23 @@ public sealed class NativeMainForm : Forms.Form
 
     private void ShowFooterWindow()
     {
-        if (_isExiting || IsDisposed || !Visible || WindowState == Forms.FormWindowState.Minimized)
+        if (!_footerWindow.IsDisposed)
         {
-            return;
+            _footerWindow.Hide();
         }
-
-        LayoutFooterWindow();
-        if (!_footerWindow.Visible)
-        {
-            _footerWindow.Show(this);
-        }
-
-        _footerWindow.TopMost = true;
-        _footerWindow.BringToFront();
-        _sensitiveWindowProtectionService.ReapplyAll();
     }
 
     private void LayoutFooterWindow()
     {
-        if (_footerWindow.IsDisposed)
+        if (!_footerWindow.IsDisposed)
         {
-            return;
+            _footerWindow.Hide();
         }
-
-        var footerHeight = _footerWindow.Height > 0 ? _footerWindow.Height : 38;
-        _footerWindow.SetBounds(Left, Math.Max(Top, Bottom - footerHeight), Math.Max(260, Width), footerHeight);
-        LayoutFooterControls();
-        SyncFooterWindowVisibility();
     }
 
     private void SyncFooterWindowVisibility()
     {
-        if (_footerWindow.IsDisposed)
-        {
-            return;
-        }
-
-        var shouldShow = !_isExiting && Visible && WindowState != Forms.FormWindowState.Minimized;
-        if (shouldShow)
-        {
-            if (!_footerWindow.Visible)
-            {
-                _footerWindow.Show(this);
-            }
-        }
-        else
+        if (!_footerWindow.IsDisposed)
         {
             _footerWindow.Hide();
         }
@@ -358,20 +344,15 @@ public sealed class NativeMainForm : Forms.Form
 
     private IntPtr GetFooterWindowHandleForProtection()
     {
-        if (_footerWindow.IsDisposed || !_footerWindow.IsHandleCreated)
-        {
-            return IntPtr.Zero;
-        }
-
-        return _footerWindow.Handle;
+        return IntPtr.Zero;
     }
 
     private void LayoutFloatingBanners()
     {
+        _statusBanner.Visible = false;
+        _protectionBanner.Visible = false;
         _statusBanner.Width = Math.Max(120, ClientSize.Width - 24);
         _protectionBanner.Left = Math.Max(12, ClientSize.Width - _protectionBanner.Width - 12);
-        _statusBanner.BringToFront();
-        _protectionBanner.BringToFront();
     }
 
     private void NormalizeSettings()
@@ -380,30 +361,46 @@ public sealed class NativeMainForm : Forms.Form
         _settings.HotKeys ??= new HotKeySettings();
         _settings.Privacy ??= new PrivacySettings();
         _settings.License ??= new LicenseSettings();
-        _settings.MainWindowOpacity = WindowOpacityController.Normalize(_settings.MainWindowOpacity);
+        var settingsChanged = false;
         _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(_settings.Overlay.WindowOpacity);
+        var mainWindowOpacity = WindowOpacityController.Normalize(_settings.MainWindowOpacity);
+        if (Math.Abs(mainWindowOpacity - _settings.Overlay.WindowOpacity) > 0.001)
+        {
+            settingsChanged = true;
+        }
+
+        _settings.MainWindowOpacity = _settings.Overlay.WindowOpacity;
+        if (_settings.MainWindowClickThrough)
+        {
+            _settings.MainWindowClickThrough = false;
+            settingsChanged = true;
+        }
 
         if (!_settings.Privacy.SensitiveWindowProtectionUserConfigured)
         {
             if (!_settings.Privacy.SensitiveWindowProtectionEnabled)
             {
                 _settings.Privacy.SensitiveWindowProtectionEnabled = true;
-                _settingsStore.Save(_settings);
+                settingsChanged = true;
             }
         }
 
         if (_settings.Privacy.RedactWhenInactive)
         {
             _settings.Privacy.RedactWhenInactive = false;
-            _settingsStore.Save(_settings);
+            settingsChanged = true;
         }
 
         if (_settings.Privacy.ManualRedactionEnabled)
         {
             _settings.Privacy.ManualRedactionEnabled = false;
-            _settingsStore.Save(_settings);
+            settingsChanged = true;
         }
 
+        if (settingsChanged)
+        {
+            _settingsStore.Save(_settings);
+        }
     }
 
     private void SyncFooterControls()
@@ -469,9 +466,11 @@ public sealed class NativeMainForm : Forms.Form
             _browser.CoreWebView2.NavigationCompleted += (_, _) =>
             {
                 _chatReadyProbeTimer.Start();
+                _mainWindowAutoScrollReader?.RefreshContentSoon();
                 QueueMainWindowOpacityReapplyBurst();
             };
             _browser.Source = new Uri("https://chatgpt.com/");
+            StartMainWindowAutoScrollReader();
             QueueMainWindowOpacityReapplyBurst();
             _sensitiveWindowProtectionService.ReapplyAll();
         }
@@ -532,10 +531,24 @@ public sealed class NativeMainForm : Forms.Form
         _overlayWindow = new NativeOverlayForm(_sensitiveWindowProtectionService);
         _overlayWindow.LoadFrom(_settings.Overlay);
         _overlayWindow.TextSubmitted += async (_, text) => await SubmitPromptAsync(text);
+        _overlayWindow.TextPreparedForEdit += async (_, text) => await PreparePromptForEditAsync(text);
         _overlayWindow.SettingsChanged += (_, overlaySettings) =>
         {
+            var normalizedOpacity = WindowOpacityController.Normalize(overlaySettings.WindowOpacity);
+            var opacityChanged = Math.Abs(_settings.MainWindowOpacity - normalizedOpacity) > 0.001;
             _settings.Overlay = overlaySettings;
+            _settings.MainWindowOpacity = normalizedOpacity;
+            _settings.MainWindowClickThrough = false;
             _settingsStore.Save(_settings);
+            _settingsWindow?.SetMainWindowClickThrough(false);
+            if (opacityChanged)
+            {
+                SyncFooterControls();
+                _settingsWindow?.SetMainWindowOpacity(normalizedOpacity);
+                _settingsWindow?.SetCaptionWindowOpacity(normalizedOpacity);
+                ApplyMainWindowOpacity();
+                QueueMainWindowOpacityReapplyBurst();
+            }
             _trayController.SetClickThrough(overlaySettings.ClickThrough);
         };
         _overlayWindow.Show();
@@ -544,16 +557,10 @@ public sealed class NativeMainForm : Forms.Form
         _trayController.SetOverlayAvailable(true);
         _trayController.SetClickThrough(_settings.Overlay.ClickThrough);
 
-        _captionWatcher = new LiveCaptionWatcher(TimeSpan.FromMilliseconds(_settings.CaptionPollMs));
+        _captionWatcher = new LiveCaptionWatcher(GetCaptionPollInterval());
         _captionWatcher.CaptionChanged += (_, snapshot) =>
         {
-            BeginOnUi(() =>
-            {
-                if (!_isExiting)
-                {
-                    _overlayWindow?.UpdateCaption(snapshot);
-                }
-            });
+            QueueCaptionSnapshot(snapshot);
         };
         _captionWatcher.StatusChanged += (_, status) =>
         {
@@ -566,6 +573,94 @@ public sealed class NativeMainForm : Forms.Form
             });
         };
         _captionWatcher.Start();
+    }
+
+    private void StartMainWindowAutoScrollReader()
+    {
+        if (_mainWindowAutoScrollReader is not null || _browser.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        _mainWindowAutoScrollReader = new MainWindowAutoScrollReader(_browser, ShowStatus);
+        _ = _mainWindowAutoScrollReader.StartAsync();
+    }
+
+    private TimeSpan GetCaptionPollInterval()
+    {
+        return TimeSpan.FromMilliseconds(Math.Clamp(_settings.CaptionPollMs, 45, 70));
+    }
+
+    private void QueueCaptionSnapshot(string snapshot)
+    {
+        var shouldSchedule = false;
+        lock (_captionUiSync)
+        {
+            if (string.Equals(snapshot, _lastQueuedCaptionSnapshot, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _pendingCaptionSnapshots.Enqueue(snapshot);
+            _lastQueuedCaptionSnapshot = snapshot;
+            while (_pendingCaptionSnapshots.Count > MaxCaptionSnapshotQueue)
+            {
+                _pendingCaptionSnapshots.Dequeue();
+            }
+
+            if (!_captionUiUpdateScheduled)
+            {
+                _captionUiUpdateScheduled = true;
+                shouldSchedule = true;
+            }
+        }
+
+        if (shouldSchedule)
+        {
+            BeginOnUi(StartCaptionFlush);
+        }
+    }
+
+    private void StartCaptionFlush()
+    {
+        if (_isExiting)
+        {
+            return;
+        }
+
+        FlushPendingCaptionSnapshot();
+        if (!_captionFlushTimer.Enabled)
+        {
+            _captionFlushTimer.Start();
+        }
+    }
+
+    private void FlushPendingCaptionSnapshot()
+    {
+        string? snapshot;
+        lock (_captionUiSync)
+        {
+            snapshot = _pendingCaptionSnapshots.Count > 0
+                ? _pendingCaptionSnapshots.Dequeue()
+                : null;
+            if (_pendingCaptionSnapshots.Count == 0)
+            {
+                _captionUiUpdateScheduled = false;
+            }
+        }
+
+        if (!_isExiting && !string.IsNullOrWhiteSpace(snapshot))
+        {
+            _overlayWindow?.UpdateCaption(snapshot);
+        }
+
+        lock (_captionUiSync)
+        {
+            if (_pendingCaptionSnapshots.Count == 0)
+            {
+                _captionFlushTimer.Stop();
+            }
+        }
     }
 
     private async Task SubmitPromptAsync(string text)
@@ -581,6 +676,7 @@ public sealed class NativeMainForm : Forms.Form
             var submission = JsonSerializer.Deserialize<SubmitResult>(result, SubmitJsonOptions);
             if (submission?.Ok == true)
             {
+                _mainWindowAutoScrollReader?.RefreshContentSoon();
                 ShowStatus("Sent to ChatGPT");
             }
             else
@@ -594,11 +690,59 @@ public sealed class NativeMainForm : Forms.Form
         }
     }
 
+    private async Task PreparePromptForEditAsync(string text)
+    {
+        if (_browser.CoreWebView2 is null || string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await _browser.CoreWebView2.ExecuteScriptAsync(ChatGptDomBridge.BuildSetPromptScript(text));
+            var submission = JsonSerializer.Deserialize<SubmitResult>(result, SubmitJsonOptions);
+            ShowStatus(submission?.Ok == true
+                ? "Put selected caption text into ChatGPT"
+                : submission?.Reason ?? "Could not find the ChatGPT prompt");
+        }
+        catch (Exception ex)
+        {
+            ShowStatus("Prepare prompt failed: " + ex.Message);
+        }
+    }
+
     private void ShowStatus(string message)
     {
         _statusText.Text = message;
-        _statusBanner.Visible = true;
+        _statusBanner.Visible = false;
         LayoutFloatingBanners();
+    }
+
+    private void CopyAutoScrollDebugToClipboard()
+    {
+        try
+        {
+            var logPath = MainWindowAutoScrollReader.LogPath;
+            IEnumerable<string> lines = File.Exists(logPath)
+                ? File.ReadLines(logPath).TakeLast(120)
+                : new[] { "Auto-scroll log does not exist yet: " + logPath };
+
+            var report = string.Join(Environment.NewLine, new[]
+            {
+                "Auto-scroll debug copied at " + DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss zzz"),
+                "App process: " + Environment.ProcessPath,
+                "Log path: " + logPath,
+                "Model path: " + Path.Combine(AppPaths.RootDirectory, "Models", "ggml-base.en.bin"),
+                ""
+            }.Concat(lines));
+
+            Forms.Clipboard.SetText(report);
+            _trayController.ShowInfo("Auto-scroll debug copied to clipboard.");
+        }
+        catch (Exception ex)
+        {
+            _trayController.ShowInfo("Could not copy auto-scroll debug: " + ex.Message);
+        }
     }
 
     private void HideStatus()
@@ -641,29 +785,33 @@ public sealed class NativeMainForm : Forms.Form
 
     private void SetMainWindowOpacity(double opacity)
     {
-        _settings.MainWindowOpacity = WindowOpacityController.Normalize(opacity);
-        _settingsStore.Save(_settings);
-        SyncFooterControls();
-        _settingsWindow?.SetMainWindowOpacity(_settings.MainWindowOpacity);
-        ApplyMainWindowOpacity();
-        QueueMainWindowOpacityReapplyBurst();
+        SetOverlayWindowOpacity(opacity);
     }
 
     private void SetMainWindowClickThrough(bool enabled)
     {
-        _mainWindowClickThrough = enabled;
-        _settings.MainWindowClickThrough = enabled;
+        _mainWindowClickThrough = false;
+        _settings.MainWindowClickThrough = false;
         _settingsStore.Save(_settings);
         SyncFooterControls();
-        _settingsWindow?.SetMainWindowClickThrough(enabled);
+        _settingsWindow?.SetMainWindowClickThrough(false);
         ApplyMainWindowClickThrough();
     }
 
     private void SetOverlayWindowOpacity(double opacity)
     {
-        _settings.Overlay.WindowOpacity = WindowOpacityController.Normalize(opacity);
+        var normalizedOpacity = WindowOpacityController.Normalize(opacity);
+        _settings.Overlay.WindowOpacity = normalizedOpacity;
+        _settings.MainWindowOpacity = normalizedOpacity;
+        _settings.MainWindowClickThrough = false;
         _settingsStore.Save(_settings);
-        _overlayWindow?.SetWindowOpacity(_settings.Overlay.WindowOpacity);
+        SyncFooterControls();
+        _settingsWindow?.SetMainWindowOpacity(normalizedOpacity);
+        _settingsWindow?.SetCaptionWindowOpacity(normalizedOpacity);
+        _settingsWindow?.SetMainWindowClickThrough(false);
+        _overlayWindow?.SetWindowOpacity(normalizedOpacity);
+        ApplyMainWindowOpacity();
+        QueueMainWindowOpacityReapplyBurst();
     }
 
     private void SetCaptionAlwaysAboveMainWindow(bool enabled)
@@ -681,15 +829,7 @@ public sealed class NativeMainForm : Forms.Form
 
     private void UpdateSensitiveWindowProtectionIndicator(SensitiveWindowProtectionSummary summary)
     {
-        if (!summary.Enabled)
-        {
-            _protectionBanner.Visible = false;
-            _toolTip.SetToolTip(_protectionBanner, null);
-            _toolTip.SetToolTip(_protectionStatusText, null);
-            return;
-        }
-
-        _protectionBanner.Visible = true;
+        _protectionBanner.Visible = false;
         _toolTip.SetToolTip(_protectionBanner, summary.Message);
         _toolTip.SetToolTip(_protectionStatusText, summary.Message);
 
@@ -726,7 +866,7 @@ public sealed class NativeMainForm : Forms.Form
         WindowOpacityController.ApplyWindowTree(Handle, _settings.MainWindowOpacity);
         ApplyMainWindowClickThrough();
 
-        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity || _opacityReapplyTicksRemaining > 0)
+        if (_opacityReapplyTicksRemaining > 0)
         {
             if (!_opacityReapplyTimer.Enabled)
             {
@@ -744,11 +884,6 @@ public sealed class NativeMainForm : Forms.Form
         WindowOpacityController.ApplyWindowTree(Handle, _settings.MainWindowOpacity);
         ApplyMainWindowClickThrough();
 
-        if (_settings.MainWindowOpacity < WindowOpacityController.MaximumOpacity)
-        {
-            return;
-        }
-
         if (_opacityReapplyTicksRemaining > 0)
         {
             _opacityReapplyTicksRemaining--;
@@ -760,7 +895,7 @@ public sealed class NativeMainForm : Forms.Form
 
     private void QueueMainWindowOpacityReapplyBurst()
     {
-        _opacityReapplyTicksRemaining = Math.Max(_opacityReapplyTicksRemaining, 40);
+        _opacityReapplyTicksRemaining = Math.Max(_opacityReapplyTicksRemaining, 4);
         ApplyMainWindowOpacity();
     }
 
@@ -771,13 +906,14 @@ public sealed class NativeMainForm : Forms.Form
             return;
         }
 
-        SetTransparentStyle(Handle, _mainWindowClickThrough);
-        SetTransparentStyle(_browser.Handle, _mainWindowClickThrough);
-        ApplyTransparentStyleToWindowTree(_browser.Handle, _mainWindowClickThrough);
-        SetTransparentStyle(_statusBanner.Handle, _mainWindowClickThrough);
-        SetTransparentStyle(_statusText.Handle, _mainWindowClickThrough);
-        SetTransparentStyle(_protectionBanner.Handle, _mainWindowClickThrough);
-        SetTransparentStyle(_protectionStatusText.Handle, _mainWindowClickThrough);
+        _mainWindowClickThrough = false;
+        SetTransparentStyle(Handle, false);
+        SetTransparentStyle(_browser.Handle, false);
+        ApplyTransparentStyleToWindowTree(_browser.Handle, false);
+        SetTransparentStyle(_statusBanner.Handle, false);
+        SetTransparentStyle(_statusText.Handle, false);
+        SetTransparentStyle(_protectionBanner.Handle, false);
+        SetTransparentStyle(_protectionStatusText.Handle, false);
     }
 
     private void EnsureOverlayAboveMainWindow()
@@ -800,10 +936,7 @@ public sealed class NativeMainForm : Forms.Form
         TryRegisterHotKey(ToggleMainWindowHotKeyId, _settings.HotKeys.ToggleMainWindow, "toggle main window");
         TryRegisterHotKey(ToggleAllWindowsHotKeyId, _settings.HotKeys.ToggleAllWindows, "toggle all windows");
         TryRegisterHotKey(ToggleOverlayHotKeyId, _settings.HotKeys.ToggleOverlay, "toggle caption dialog");
-        TryRegisterHotKey(ToggleMainClickThroughHotKeyId, _settings.HotKeys.ToggleMainClickThrough, "toggle main click-through");
         TryRegisterHotKey(ToggleCaptionClickThroughHotKeyId, _settings.HotKeys.ToggleCaptionClickThrough, "toggle caption click-through");
-        TryRegisterHotKey(IncreaseMainOpacityHotKeyId, _settings.HotKeys.IncreaseMainOpacity, "increase main opacity");
-        TryRegisterHotKey(DecreaseMainOpacityHotKeyId, _settings.HotKeys.DecreaseMainOpacity, "decrease main opacity");
         TryRegisterHotKey(IncreaseCaptionOpacityHotKeyId, _settings.HotKeys.IncreaseCaptionOpacity, "increase caption opacity");
         TryRegisterHotKey(DecreaseCaptionOpacityHotKeyId, _settings.HotKeys.DecreaseCaptionOpacity, "decrease caption opacity");
         TryRegisterHotKey(IncreaseCaptionFontSizeHotKeyId, _settings.HotKeys.IncreaseCaptionFontSize, "increase caption font size");
@@ -871,16 +1004,16 @@ public sealed class NativeMainForm : Forms.Form
                     ToggleOverlayWindow();
                     break;
                 case ToggleMainClickThroughHotKeyId:
-                    SetMainWindowClickThrough(!_settings.MainWindowClickThrough);
+                    SetMainWindowClickThrough(false);
                     break;
                 case ToggleCaptionClickThroughHotKeyId:
                     SetOverlayClickThrough(!_settings.Overlay.ClickThrough);
                     break;
                 case IncreaseMainOpacityHotKeyId:
-                    AdjustMainWindowOpacity(0.05);
+                    AdjustCaptionWindowOpacity(0.05);
                     break;
                 case DecreaseMainOpacityHotKeyId:
-                    AdjustMainWindowOpacity(-0.05);
+                    AdjustCaptionWindowOpacity(-0.05);
                     break;
                 case IncreaseCaptionOpacityHotKeyId:
                     AdjustCaptionWindowOpacity(0.05);
@@ -949,7 +1082,8 @@ public sealed class NativeMainForm : Forms.Form
 
     private void ToggleMainWindow()
     {
-        if (Visible && WindowState != Forms.FormWindowState.Minimized)
+        var hasInputFocus = ContainsFocus || ActiveForm == this;
+        if (Visible && WindowState != Forms.FormWindowState.Minimized && hasInputFocus)
         {
             _footerWindow.Hide();
             Hide();
@@ -1088,6 +1222,8 @@ public sealed class NativeMainForm : Forms.Form
         _servicesShutdown = true;
         _chatReadyProbeTimer.Stop();
         _opacityReapplyTimer.Stop();
+        _captionFlushTimer.Stop();
+        _mainWindowAutoScrollReader?.Dispose();
         _captionWatcher?.Dispose();
 
         if (_overlayWindow is not null)
@@ -1105,6 +1241,7 @@ public sealed class NativeMainForm : Forms.Form
         _sensitiveWindowProtectionService.UnregisterWindowHandle(MainWindowRegistrationId);
         (_sensitiveWindowProtectionService as IDisposable)?.Dispose();
         _trayController.Dispose();
+        _captionFlushTimer.Dispose();
         LiveCaptionsLauncher.CloseIfOpen();
         UnregisterOverlayHotKeys();
         _browser.Dispose();
@@ -1127,13 +1264,22 @@ public sealed class NativeMainForm : Forms.Form
 
     private void ShowMainWindow()
     {
+        if (IsHandleCreated)
+        {
+            AltTabWindowHider.HideFromAltTab(Handle);
+        }
+
         Show();
         WindowState = Forms.FormWindowState.Normal;
         TopMost = true;
-        ShowFooterWindow();
+        _footerWindow.Hide();
+        _mainWindowClickThrough = false;
+        _settings.MainWindowClickThrough = false;
         ApplyMainWindowOpacity();
         Activate();
         ShowBrowserContent();
+        _browser.Focus();
+        _browser.Select();
         EnsureOverlayAboveMainWindow();
     }
 

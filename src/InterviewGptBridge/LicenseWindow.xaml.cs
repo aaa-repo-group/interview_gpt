@@ -1,5 +1,6 @@
 using System.Windows;
 using InterviewGptBridge.Licensing;
+using InterviewGptBridge.Services;
 
 namespace InterviewGptBridge;
 
@@ -13,6 +14,7 @@ public partial class LicenseWindow : Window
     public LicenseWindow(string deviceId, string statusMessage)
     {
         InitializeComponent();
+        AltTabWindowHider.HideFromAltTab(this);
 
         _deviceId = LicenseKeyService.NormalizeDeviceId(deviceId);
         DeviceIdTextBox.Text = LicenseKeyService.FormatDeviceId(_deviceId);

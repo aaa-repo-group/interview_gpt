@@ -21,6 +21,7 @@ public partial class SettingsWindow : Window
     public SettingsWindow()
     {
         InitializeComponent();
+        AltTabWindowHider.HideFromAltTab(this);
     }
 
     public void LoadFrom(
@@ -62,6 +63,14 @@ public partial class SettingsWindow : Window
         _loading = true;
         MainWindowOpacitySlider.Value = ToPercent(opacity);
         UpdateOpacityText(MainWindowOpacityText, MainWindowOpacitySlider.Value);
+        _loading = false;
+    }
+
+    public void SetCaptionWindowOpacity(double opacity)
+    {
+        _loading = true;
+        CaptionWindowOpacitySlider.Value = ToPercent(opacity);
+        UpdateOpacityText(CaptionWindowOpacityText, CaptionWindowOpacitySlider.Value);
         _loading = false;
     }
 

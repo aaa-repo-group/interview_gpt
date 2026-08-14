@@ -4,7 +4,7 @@ public sealed class AppSettings
 {
     public string? DeviceId { get; set; }
     public bool EnableDevTools { get; set; }
-    public int CaptionPollMs { get; set; } = 120;
+    public int CaptionPollMs { get; set; } = 60;
     public double MainWindowOpacity { get; set; } = 1.0;
     public bool MainWindowClickThrough { get; set; }
     public OverlaySettings Overlay { get; set; } = new();

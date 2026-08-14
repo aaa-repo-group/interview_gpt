@@ -12,6 +12,7 @@ public sealed class TrayController : IDisposable
     public event EventHandler? ShowMainRequested;
     public event EventHandler? ShowOverlayRequested;
     public event EventHandler? SettingsRequested;
+    public event EventHandler? CopyAutoScrollDebugRequested;
     public event EventHandler? HideAllRequested;
     public event Action<bool>? ClickThroughChanged;
     public event EventHandler? ExitRequested;
@@ -31,6 +32,9 @@ public sealed class TrayController : IDisposable
         var settingsMenuItem = new Forms.ToolStripMenuItem("Settings...");
         settingsMenuItem.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
 
+        var copyAutoScrollDebugMenuItem = new Forms.ToolStripMenuItem("Copy auto-scroll debug");
+        copyAutoScrollDebugMenuItem.Click += (_, _) => CopyAutoScrollDebugRequested?.Invoke(this, EventArgs.Empty);
+
         _clickThroughMenuItem = new Forms.ToolStripMenuItem("Caption click-through")
         {
             CheckOnClick = true,
@@ -45,6 +49,7 @@ public sealed class TrayController : IDisposable
         menu.Items.Add(openMainMenuItem);
         menu.Items.Add(_showOverlayMenuItem);
         menu.Items.Add(settingsMenuItem);
+        menu.Items.Add(copyAutoScrollDebugMenuItem);
         menu.Items.Add(hideAllMenuItem);
         menu.Items.Add(_clickThroughMenuItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -69,6 +74,18 @@ public sealed class TrayController : IDisposable
     public void SetClickThrough(bool enabled)
     {
         _clickThroughMenuItem.Checked = enabled;
+    }
+
+    public void ShowInfo(string message)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _notifyIcon.BalloonTipTitle = "ThanksAAA";
+        _notifyIcon.BalloonTipText = message;
+        _notifyIcon.ShowBalloonTip(2500);
     }
 
     public void Dispose()

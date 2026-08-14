@@ -35,6 +35,93 @@ public static class ChatGptDomBridge
         })();
         """;
 
+    public static string BuildSetPromptScript(string text)
+    {
+        var jsonText = JsonSerializer.Serialize(text);
+
+        return $$"""
+        (async () => {
+          const text = {{jsonText}};
+
+          const isVisible = (element) => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 20 && rect.height > 20 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+
+          const promptSelectors = [
+            '#prompt-textarea',
+            '[data-testid="prompt-textarea"]',
+            'textarea',
+            'div[contenteditable="true"]',
+            '[role="textbox"][contenteditable="true"]'
+          ];
+
+          const findPrompt = () => {
+            const candidates = promptSelectors
+              .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+              .filter(isVisible);
+            return candidates[candidates.length - 1] || null;
+          };
+
+          const dispatchInput = (element, data) => {
+            element.dispatchEvent(new InputEvent('beforeinput', {
+              bubbles: true,
+              cancelable: true,
+              inputType: 'insertText',
+              data
+            }));
+            element.dispatchEvent(new InputEvent('input', {
+              bubbles: true,
+              inputType: 'insertText',
+              data
+            }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+
+          const prompt = findPrompt();
+          if (!prompt) {
+            return { ok: false, reason: 'ChatGPT prompt not found' };
+          }
+
+          prompt.focus();
+
+          if (prompt instanceof HTMLTextAreaElement || prompt instanceof HTMLInputElement) {
+            const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(prompt), 'value')?.set;
+            if (setter) {
+              setter.call(prompt, text);
+            } else {
+              prompt.value = text;
+            }
+            dispatchInput(prompt, text);
+          } else {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(prompt);
+            selection.removeAllRanges();
+            selection.addRange(range);
+
+            let inserted = false;
+            try {
+              inserted = document.execCommand('insertText', false, text);
+            } catch {
+              inserted = false;
+            }
+
+            if (!inserted) {
+              prompt.textContent = text;
+            }
+
+            dispatchInput(prompt, text);
+          }
+
+          await new Promise((resolve) => window.requestAnimationFrame(resolve));
+          return { ok: true, reason: 'Prompt updated' };
+        })();
+        """;
+    }
+
     public static string BuildSubmitScript(string text)
     {
         var jsonText = JsonSerializer.Serialize(text);

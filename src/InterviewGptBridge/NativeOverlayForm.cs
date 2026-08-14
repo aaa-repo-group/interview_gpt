@@ -11,7 +11,14 @@ public sealed class NativeOverlayForm : Forms.Form
     private const int GwlExStyle = -20;
     private const int WmNcHitTest = 0x0084;
     private const int WmSetCursor = 0x0020;
+    private const int WmSetRedraw = 0x000B;
+    private const int WmVScroll = 0x0115;
     private const int HtTransparent = -1;
+    private const int SbBottomCommand = 7;
+    private const uint SifRange = 0x0001;
+    private const uint SifPage = 0x0002;
+    private const uint SifPos = 0x0004;
+    private const uint SifBottomStatus = SifRange | SifPage | SifPos;
     private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const uint SwpNoSize = 0x0001;
@@ -26,28 +33,42 @@ public sealed class NativeOverlayForm : Forms.Form
     private readonly Forms.TrackBar _fontSizeTrackBar = new();
     private readonly Forms.TrackBar _opacityTrackBar = new();
     private readonly Forms.Timer _opacityReapplyTimer = new();
+    private readonly Forms.Timer _bottomScrollTimer = new();
     private bool _loading;
     private bool _allowClose;
     private bool _clickThrough;
     private bool _keepAboveMainWindow = true;
     private bool _mouseSelecting;
+    private bool _keyboardSelecting;
     private bool _autoScrollToBottom = true;
-    private string? _pendingCaption;
     private string _lastCaption = string.Empty;
+    private string _captionHistory = string.Empty;
+    private string _lastRenderedCaption = string.Empty;
+    private bool _selectionTracksEnd;
+    private int _trackedSelectionStart = -1;
+    private string _trackedAnchorPrefix = string.Empty;
     private double _windowOpacity = 1.0;
 
     public event EventHandler<string>? TextSubmitted;
+    public event EventHandler<string>? TextPreparedForEdit;
     public event EventHandler<OverlaySettings>? SettingsChanged;
 
     public NativeOverlayForm(ISensitiveWindowProtectionService sensitiveWindowProtectionService)
     {
         _sensitiveWindowProtectionService = sensitiveWindowProtectionService;
         _protectionWindowId = nameof(NativeOverlayForm) + "#" + GetHashCode().ToString("X");
+        AltTabWindowHider.HideFromAltTab(this);
 
         InitializeNativeUi();
 
         _opacityReapplyTimer.Interval = 750;
         _opacityReapplyTimer.Tick += (_, _) => ApplyWindowOpacity();
+        _bottomScrollTimer.Interval = 30;
+        _bottomScrollTimer.Tick += (_, _) =>
+        {
+            _bottomScrollTimer.Stop();
+            ScrollCaptionToBottomNow();
+        };
 
         Load += (_, _) =>
         {
@@ -70,6 +91,7 @@ public sealed class NativeOverlayForm : Forms.Form
         FormClosed += (_, _) =>
         {
             _opacityReapplyTimer.Stop();
+            _bottomScrollTimer.Stop();
             _sensitiveWindowProtectionService.UnregisterWindowHandle(_protectionWindowId);
         };
 
@@ -174,13 +196,18 @@ public sealed class NativeOverlayForm : Forms.Form
 
     public void UpdateCaption(string caption)
     {
-        if (string.Equals(caption, _lastCaption, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(caption))
         {
             return;
         }
 
+        var previousHistory = _captionHistory;
+        var repeatedAfterSilence = string.Equals(caption, _lastCaption, StringComparison.Ordinal);
+        var merge = CaptionHistoryMerger.MergeDetailed(_captionHistory, _lastCaption, caption, repeatedAfterSilence);
+        _captionHistory = merge.History;
         _lastCaption = caption;
-        ApplyCaption(caption);
+
+        ApplyCaption(merge, previousHistory);
     }
 
     public void CloseForExit()
@@ -217,6 +244,7 @@ public sealed class NativeOverlayForm : Forms.Form
 
         _captionTextBox.Multiline = true;
         _captionTextBox.ReadOnly = true;
+        _captionTextBox.HideSelection = false;
         _captionTextBox.WordWrap = true;
         _captionTextBox.ScrollBars = Forms.ScrollBars.Vertical;
         _captionTextBox.BorderStyle = Forms.BorderStyle.None;
@@ -226,8 +254,26 @@ public sealed class NativeOverlayForm : Forms.Form
         _captionTextBox.Font = new Drawing.Font("Segoe UI", 18, Drawing.FontStyle.Regular);
         _captionTextBox.Padding = new Forms.Padding(12);
         _captionTextBox.KeyDown += CaptionTextBox_KeyDown;
-        _captionTextBox.MouseDown += (_, _) => _mouseSelecting = true;
+        _captionTextBox.KeyUp += CaptionTextBox_KeyUp;
+        _captionTextBox.MouseDown += (_, _) =>
+        {
+            _mouseSelecting = true;
+            _captionTextBox.Capture = true;
+            ClearTrackedSelection();
+        };
         _captionTextBox.MouseUp += (_, _) => FinishMouseSelection();
+        _captionTextBox.MouseCaptureChanged += (_, _) =>
+        {
+            if (_mouseSelecting && Forms.Control.MouseButtons != Forms.MouseButtons.Left)
+            {
+                FinishMouseSelection();
+            }
+        };
+        _captionTextBox.LostFocus += (_, _) =>
+        {
+            _mouseSelecting = false;
+            _keyboardSelecting = false;
+        };
         _captionTextBox.MouseWheel += (_, e) =>
         {
             if (e.Delta > 0)
@@ -275,39 +321,102 @@ public sealed class NativeOverlayForm : Forms.Form
         _opacityTrackBar.SetBounds(_fontSizeTrackBar.Right + gap, 4, width, 22);
     }
 
-    private void ApplyCaption(string caption)
+    private void ApplyCaption(CaptionHistoryMergeResult merge, string previousHistory)
     {
-        if (_mouseSelecting)
+        var caption = merge.History;
+        if (string.Equals(caption, _lastRenderedCaption, StringComparison.Ordinal))
         {
-            _pendingCaption = caption;
+            if (_autoScrollToBottom || _selectionTracksEnd)
+            {
+                QueueScrollCaptionToBottom();
+            }
+
             return;
         }
 
+        var previousCaption = _lastRenderedCaption;
         var hadFocus = _captionTextBox.Focused;
         var selectionStart = _captionTextBox.SelectionStart;
         var selectionLength = _captionTextBox.SelectionLength;
+        var selectionEnd = selectionStart + selectionLength;
         var selectedText = selectionLength > 0 ? _captionTextBox.SelectedText : string.Empty;
-        var shouldAutoScroll = _autoScrollToBottom || IsScrolledToBottom();
+        var shouldAutoScroll = _autoScrollToBottom || _selectionTracksEnd || IsScrolledToBottom();
+        var selectionReachedOldEnd = selectionEnd >= Math.Max(0, previousCaption.Length - 2);
 
-        _captionTextBox.Text = caption;
+        SetTextBoxRedraw(false);
+        try
+        {
+            ApplyCaptionTextChange(merge, previousHistory, caption);
+            _lastRenderedCaption = caption;
 
-        if (selectionLength > 0)
-        {
-            RestoreManualSelection(caption, selectedText, selectionStart, selectionLength);
+            if (IsSelectionInProgress)
+            {
+                RestoreMappedSelectionDuringMouseSelection(
+                    previousCaption,
+                    caption,
+                    selectionStart,
+                    selectionEnd,
+                    selectionReachedOldEnd,
+                    shouldAutoScroll);
+            }
+            else if (_selectionTracksEnd && _trackedSelectionStart >= 0)
+            {
+                var nextStart = CaptionSelectionAnchor.MapStart(
+                    previousCaption,
+                    caption,
+                    _trackedSelectionStart,
+                    _trackedAnchorPrefix);
+                _trackedSelectionStart = Math.Clamp(nextStart, 0, _captionTextBox.TextLength);
+                _trackedAnchorPrefix = GetPrefix(_captionTextBox.Text, _trackedSelectionStart);
+                SetSelection(_trackedSelectionStart, _captionTextBox.TextLength - _trackedSelectionStart);
+            }
+            else if (selectionLength > 0)
+            {
+                RestoreManualSelection(caption, selectedText, selectionStart, selectionLength);
+            }
+            else if (hadFocus)
+            {
+                SetSelection(selectionStart, 0);
+            }
+            else
+            {
+                SetSelection(_captionTextBox.TextLength, 0);
+            }
+
+            if (shouldAutoScroll)
+            {
+                ScrollCaptionToBottomNow();
+                QueueScrollCaptionToBottom();
+            }
         }
-        else if (hadFocus)
+        finally
         {
-            _captionTextBox.SelectionStart = Math.Clamp(selectionStart, 0, _captionTextBox.TextLength);
-            _captionTextBox.SelectionLength = 0;
+            SetTextBoxRedraw(true);
         }
-        else
+    }
+
+    private void ApplyCaptionTextChange(CaptionHistoryMergeResult merge, string previousHistory, string caption)
+    {
+        if (!merge.HasChange ||
+            !string.Equals(previousHistory, _lastRenderedCaption, StringComparison.Ordinal))
         {
-            _captionTextBox.SelectionStart = _captionTextBox.TextLength;
+            _captionTextBox.Text = caption;
+            return;
         }
 
-        if (shouldAutoScroll)
+        var replaceStart = Math.Clamp(merge.ReplaceStart, 0, _captionTextBox.TextLength);
+        var replaceLength = Math.Max(0, Math.Min(merge.ReplaceLength, _captionTextBox.TextLength - replaceStart));
+        var wasReadOnly = _captionTextBox.ReadOnly;
+        try
         {
-            ScrollCaptionToBottom();
+            _captionTextBox.ReadOnly = false;
+            _captionTextBox.SelectionStart = replaceStart;
+            _captionTextBox.SelectionLength = replaceLength;
+            _captionTextBox.SelectedText = merge.InsertedText;
+        }
+        finally
+        {
+            _captionTextBox.ReadOnly = wasReadOnly;
         }
     }
 
@@ -324,21 +433,47 @@ public sealed class NativeOverlayForm : Forms.Form
             nextStart = Math.Clamp(previousStart, 0, _captionTextBox.TextLength);
         }
 
-        _captionTextBox.SelectionStart = nextStart;
-        _captionTextBox.SelectionLength = Math.Max(0, Math.Min(previousLength, _captionTextBox.TextLength - nextStart));
+        SetSelection(nextStart, previousLength);
+    }
+
+    private void RestoreMappedSelectionDuringMouseSelection(
+        string previousCaption,
+        string caption,
+        int previousStart,
+        int previousEnd,
+        bool selectionReachedOldEnd,
+        bool shouldAutoScroll)
+    {
+        var nextStart = CaptionSelectionAnchor.MapStart(
+            previousCaption,
+            caption,
+            previousStart,
+            GetPrefix(previousCaption, previousStart));
+        var nextEnd = selectionReachedOldEnd && shouldAutoScroll
+            ? caption.Length
+            : CaptionSelectionAnchor.MapStart(
+                previousCaption,
+                caption,
+                previousEnd,
+                GetPrefix(previousCaption, previousEnd));
+
+        if (nextEnd < nextStart)
+        {
+            (nextStart, nextEnd) = (nextEnd, nextStart);
+        }
+
+        SetSelection(nextStart, nextEnd - nextStart);
     }
 
     private void FinishMouseSelection()
     {
         _mouseSelecting = false;
-        if (_pendingCaption is null || string.Equals(_pendingCaption, _captionTextBox.Text, StringComparison.Ordinal))
+        if (_captionTextBox.Capture)
         {
-            return;
+            _captionTextBox.Capture = false;
         }
 
-        var pendingCaption = _pendingCaption;
-        _pendingCaption = null;
-        BeginInvoke(() => ApplyCaption(pendingCaption));
+        UpdateSelectionTrackingFromCurrentSelection();
     }
 
     private void CaptionTextBox_KeyDown(object? sender, Forms.KeyEventArgs e)
@@ -346,16 +481,76 @@ public sealed class NativeOverlayForm : Forms.Form
         if (e.KeyCode is Forms.Keys.Up or Forms.Keys.PageUp or Forms.Keys.Home)
         {
             _autoScrollToBottom = false;
+            ClearTrackedSelection();
+        }
+
+        if ((e.Modifiers & Forms.Keys.Shift) == Forms.Keys.Shift &&
+            e.KeyCode is Forms.Keys.Left or Forms.Keys.Right or Forms.Keys.Up or Forms.Keys.Down or Forms.Keys.Home or Forms.Keys.End)
+        {
+            _keyboardSelecting = true;
+            ClearTrackedSelection();
+        }
+
+        if (e.KeyCode == Forms.Keys.A && e.Modifiers == Forms.Keys.Control)
+        {
+            e.Handled = true;
+            _captionTextBox.SelectAll();
+            UpdateSelectionTrackingFromCurrentSelection();
+            return;
+        }
+
+        if (e.KeyCode == Forms.Keys.Enter && e.Modifiers == Forms.Keys.Shift)
+        {
+            e.Handled = true;
+            var nextSelectionStart = _captionTextBox.SelectionStart + _captionTextBox.SelectionLength;
+            PrepareCurrentTextForEdit();
+            BeginAutoSelectionFrom(nextSelectionStart);
+            return;
         }
 
         if (e.KeyCode == Forms.Keys.Enter && e.Modifiers == Forms.Keys.None)
         {
             e.Handled = true;
+            var nextSelectionStart = _captionTextBox.SelectionStart + _captionTextBox.SelectionLength;
             SubmitCurrentText();
+            BeginAutoSelectionFrom(nextSelectionStart);
         }
     }
 
+    private void CaptionTextBox_KeyUp(object? sender, Forms.KeyEventArgs e)
+    {
+        if (e.KeyCode is Forms.Keys.Left or Forms.Keys.Right or Forms.Keys.Up or Forms.Keys.Down or Forms.Keys.Home or Forms.Keys.End or Forms.Keys.PageUp or Forms.Keys.PageDown)
+        {
+            UpdateSelectionTrackingFromCurrentSelection();
+        }
+
+        if ((Forms.Control.ModifierKeys & Forms.Keys.Shift) != Forms.Keys.Shift)
+        {
+            _keyboardSelecting = false;
+        }
+    }
+
+    private bool IsSelectionInProgress => _mouseSelecting || _keyboardSelecting;
+
     private void SubmitCurrentText()
+    {
+        var text = GetCurrentTransferText();
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            TextSubmitted?.Invoke(this, text);
+        }
+    }
+
+    private void PrepareCurrentTextForEdit()
+    {
+        var text = GetCurrentTransferText();
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            TextPreparedForEdit?.Invoke(this, text);
+        }
+    }
+
+    private string GetCurrentTransferText()
     {
         var text = _captionTextBox.SelectedText;
         if (string.IsNullOrWhiteSpace(text))
@@ -378,11 +573,46 @@ public sealed class NativeOverlayForm : Forms.Form
             text = _captionTextBox.Text;
         }
 
-        text = text.Trim();
-        if (!string.IsNullOrWhiteSpace(text))
+        return text.Trim();
+    }
+
+    private void UpdateSelectionTrackingFromCurrentSelection()
+    {
+        var selectionStart = _captionTextBox.SelectionStart;
+        var selectionLength = _captionTextBox.SelectionLength;
+        if (selectionLength <= 0)
         {
-            TextSubmitted?.Invoke(this, text);
+            _selectionTracksEnd = _autoScrollToBottom || IsScrolledToBottom();
+            _trackedSelectionStart = _selectionTracksEnd ? _captionTextBox.TextLength : -1;
+            _trackedAnchorPrefix = _selectionTracksEnd ? _captionTextBox.Text : string.Empty;
+            return;
         }
+
+        var selectionEnd = selectionStart + selectionLength;
+        _selectionTracksEnd = selectionEnd >= Math.Max(0, _captionTextBox.TextLength - 2);
+        _trackedSelectionStart = _selectionTracksEnd ? selectionStart : -1;
+        _trackedAnchorPrefix = _selectionTracksEnd ? GetPrefix(_captionTextBox.Text, selectionStart) : string.Empty;
+        _autoScrollToBottom = _selectionTracksEnd;
+    }
+
+    private void BeginAutoSelectionFrom(int start)
+    {
+        _trackedSelectionStart = Math.Clamp(start, 0, _captionTextBox.TextLength);
+        _trackedAnchorPrefix = GetPrefix(_captionTextBox.Text, _trackedSelectionStart);
+        _selectionTracksEnd = true;
+        _autoScrollToBottom = true;
+        SetTextBoxRedraw(false);
+        try
+        {
+            SetSelection(_trackedSelectionStart, _captionTextBox.TextLength - _trackedSelectionStart);
+            ScrollCaptionToBottomNow();
+        }
+        finally
+        {
+            SetTextBoxRedraw(true);
+        }
+
+        QueueScrollCaptionToBottom();
     }
 
     private void FontSizeTrackBar_ValueChanged(object? sender, EventArgs e)
@@ -420,20 +650,9 @@ public sealed class NativeOverlayForm : Forms.Form
             return;
         }
 
-        WindowOpacityController.ApplyWindowTree(Handle, _windowOpacity);
+        WindowOpacityController.Apply(Handle, _windowOpacity);
         ApplyClickThrough();
-
-        if (_windowOpacity < WindowOpacityController.MaximumOpacity)
-        {
-            if (!_opacityReapplyTimer.Enabled)
-            {
-                _opacityReapplyTimer.Start();
-            }
-        }
-        else
-        {
-            _opacityReapplyTimer.Stop();
-        }
+        _opacityReapplyTimer.Stop();
     }
 
     private void ApplyVisiblePosition(double savedLeft, double savedTop)
@@ -455,14 +674,86 @@ public sealed class NativeOverlayForm : Forms.Form
 
     private bool IsScrolledToBottom()
     {
-        return GetScrollPos(_captionTextBox.Handle, SbVert) >= Math.Max(0, GetScrollMax(_captionTextBox.Handle, SbVert) - 2);
+        if (_captionTextBox.IsDisposed || !_captionTextBox.IsHandleCreated)
+        {
+            return _autoScrollToBottom;
+        }
+
+        var info = new ScrollInfo
+        {
+            cbSize = Marshal.SizeOf<ScrollInfo>(),
+            fMask = SifBottomStatus
+        };
+
+        if (!GetScrollInfo(_captionTextBox.Handle, SbVert, ref info))
+        {
+            return _autoScrollToBottom;
+        }
+
+        var page = info.nPage == 0 || info.nPage > int.MaxValue ? 1 : (int)info.nPage;
+        var maxScrollablePosition = Math.Max(info.nMin, info.nMax - page + 1);
+        return info.nPos >= maxScrollablePosition - 2;
     }
 
-    private void ScrollCaptionToBottom()
+    private void QueueScrollCaptionToBottom()
     {
         _autoScrollToBottom = true;
-        _captionTextBox.SelectionStart = _captionTextBox.TextLength;
-        _captionTextBox.ScrollToCaret();
+        if (!_bottomScrollTimer.Enabled)
+        {
+            _bottomScrollTimer.Start();
+        }
+    }
+
+    private void ScrollCaptionToBottomNow()
+    {
+        if (!IsHandleCreated || !_captionTextBox.IsHandleCreated)
+        {
+            return;
+        }
+
+        _autoScrollToBottom = true;
+        SendMessage(_captionTextBox.Handle, WmVScroll, new IntPtr(SbBottomCommand), IntPtr.Zero);
+    }
+
+    private void SetSelection(int start, int length)
+    {
+        start = Math.Clamp(start, 0, _captionTextBox.TextLength);
+        length = Math.Max(0, Math.Min(length, _captionTextBox.TextLength - start));
+        _captionTextBox.SelectionStart = start;
+        _captionTextBox.SelectionLength = length;
+    }
+
+    private void ClearTrackedSelection()
+    {
+        _selectionTracksEnd = false;
+        _trackedSelectionStart = -1;
+        _trackedAnchorPrefix = string.Empty;
+    }
+
+    private void SetTextBoxRedraw(bool enabled)
+    {
+        if (_captionTextBox.IsDisposed || !_captionTextBox.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            SendMessage(_captionTextBox.Handle, WmSetRedraw, enabled ? new IntPtr(1) : IntPtr.Zero, IntPtr.Zero);
+            if (enabled)
+            {
+                _captionTextBox.Invalidate();
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private static string GetPrefix(string text, int length)
+    {
+        length = Math.Clamp(length, 0, text.Length);
+        return length == 0 ? string.Empty : text[..length];
     }
 
     private void RaiseSettingsChanged()
@@ -538,8 +829,20 @@ public sealed class NativeOverlayForm : Forms.Form
     private static extern bool SetWindowPos(IntPtr hwnd, IntPtr hwndInsertAfter, int x, int y, int width, int height, uint flags);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetScrollPos(IntPtr hwnd, int bar);
+    private static extern bool GetScrollInfo(IntPtr hwnd, int bar, ref ScrollInfo scrollInfo);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetScrollMax(IntPtr hwnd, int bar);
+    private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ScrollInfo
+    {
+        public int cbSize;
+        public uint fMask;
+        public int nMin;
+        public int nMax;
+        public uint nPage;
+        public int nPos;
+        public int nTrackPos;
+    }
 }

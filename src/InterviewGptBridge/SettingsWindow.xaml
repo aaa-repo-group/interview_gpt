@@ -68,7 +68,7 @@
             <TextBlock FontSize="13"
                        FontWeight="SemiBold"
                        Foreground="#CAD1DD"
-                       Text="Window Opacity" />
+                       Text="Caption + Main Opacity" />
 
             <Grid Margin="0,12,0,0">
                 <Grid.ColumnDefinitions>
@@ -77,8 +77,8 @@
                     <ColumnDefinition Width="48" />
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="10" />
+                    <RowDefinition Height="0" />
+                    <RowDefinition Height="0" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
@@ -87,6 +87,7 @@
                            VerticalAlignment="Center"
                            Foreground="#AEB7C5"
                            FontSize="12"
+                           Visibility="Collapsed"
                            Text="Main window" />
                 <Slider x:Name="MainWindowOpacitySlider"
                         Grid.Row="0"
@@ -95,6 +96,7 @@
                         Minimum="0"
                         Maximum="100"
                         TickFrequency="1"
+                        Visibility="Collapsed"
                         ValueChanged="MainWindowOpacitySlider_ValueChanged" />
                 <TextBlock x:Name="MainWindowOpacityText"
                            Grid.Row="0"
@@ -102,6 +104,7 @@
                            VerticalAlignment="Center"
                            HorizontalAlignment="Right"
                            Foreground="#AEB7C5"
+                           Visibility="Collapsed"
                            FontSize="12" />
 
                 <TextBlock Grid.Row="2"
@@ -131,6 +134,7 @@
                       Margin="150,12,0,0"
                       Foreground="#F4F7FB"
                       Content="Main window click-through"
+                      Visibility="Collapsed"
                       Checked="MainWindowClickThroughCheckBox_Changed"
                       Unchecked="MainWindowClickThroughCheckBox_Changed" />
         </StackPanel>
@@ -234,12 +238,14 @@
                            VerticalAlignment="Center"
                            Foreground="#AEB7C5"
                            FontSize="12"
+                           Visibility="Collapsed"
                            Text="Main click-through" />
                 <TextBox x:Name="ToggleMainClickThroughHotKeyTextBox"
                          Grid.Row="6"
                          Grid.Column="1"
                          Height="28"
                          Padding="8,4"
+                         Visibility="Collapsed"
                          PreviewKeyDown="HotKeyTextBox_PreviewKeyDown" />
 
                 <TextBlock Grid.Row="8"
@@ -260,12 +266,14 @@
                            VerticalAlignment="Center"
                            Foreground="#AEB7C5"
                            FontSize="12"
+                           Visibility="Collapsed"
                            Text="Main opacity up" />
                 <TextBox x:Name="IncreaseMainOpacityHotKeyTextBox"
                          Grid.Row="10"
                          Grid.Column="1"
                          Height="28"
                          Padding="8,4"
+                         Visibility="Collapsed"
                          PreviewKeyDown="HotKeyTextBox_PreviewKeyDown" />
 
                 <TextBlock Grid.Row="12"
@@ -273,12 +281,14 @@
                            VerticalAlignment="Center"
                            Foreground="#AEB7C5"
                            FontSize="12"
+                           Visibility="Collapsed"
                            Text="Main opacity down" />
                 <TextBox x:Name="DecreaseMainOpacityHotKeyTextBox"
                          Grid.Row="12"
                          Grid.Column="1"
                          Height="28"
                          Padding="8,4"
+                         Visibility="Collapsed"
                          PreviewKeyDown="HotKeyTextBox_PreviewKeyDown" />
 
                 <TextBlock Grid.Row="14"
